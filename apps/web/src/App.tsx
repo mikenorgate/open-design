@@ -169,6 +169,18 @@ export function resolveSettingsCloseConfig(
 export function App() {
   const { t } = useI18n();
   const clientType = useMemo(() => detectClientType(), []);
+  // Observability marker. `apps/web/src/observability/white-screen.ts`
+  // keys its "app actually mounted" success condition on this attribute
+  // because the dynamic-import loading shell (`<div class="od-loading-shell">
+  // Loading Open Design…</div>`) is itself >MIN_VISIBLE_TEXT and would
+  // otherwise be mistaken for a real mount. Survives subsequent render
+  // crashes — once App has mounted at least once, it's no longer a white
+  // screen (subsequent failures show up as `$exception`).
+  useEffect(() => {
+    if (typeof document !== 'undefined') {
+      document.documentElement.setAttribute('data-od-app-mounted', '1');
+    }
+  }, []);
   const [config, setConfig] = useState<AppConfig>(() => loadConfig());
   const configRef = useRef(config);
   configRef.current = config;

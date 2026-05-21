@@ -13,6 +13,14 @@ export type PackagedNamespacePaths = {
   electronSessionDataRoot: string;
   electronUserDataRoot: string;
   headlessIdentityPath: string;
+  /**
+   * Channel-root directory — one level above the `namespaces/` parent. The
+   * daemon writes `installation.json` here so installationId survives any
+   * reset of the namespace-scoped data subtree (namespace churn between
+   * packaged versions, future per-namespace data wipes, etc.). See
+   * `apps/daemon/src/installation.ts`.
+   */
+  installationRoot: string;
   installerObservationRoot: string;
   logsRoot: string;
   namespaceRoot: string;
@@ -29,6 +37,12 @@ export function resolvePackagedNamespacePaths(
   const normalizedNamespace = normalizeNamespace(namespace);
   const namespaceRoot = join(config.namespaceBaseRoot, normalizedNamespace);
   const dataRoot = join(namespaceRoot, "data");
+  // Channel root = parent of the `namespaces/` directory. With the default
+  // packaged layout this resolves to `<electronApp.userData>` — e.g.
+  // `~/Library/Application Support/Open Design Nightly/` on mac. Custom
+  // `namespaceBaseRoot` overrides (tests, multi-namespace deployments)
+  // still get a usable parent here.
+  const installationRoot = join(config.namespaceBaseRoot, "..");
 
   return {
     cacheRoot: join(namespaceRoot, "cache"),
@@ -39,6 +53,7 @@ export function resolvePackagedNamespacePaths(
     electronSessionDataRoot: join(namespaceRoot, "user-data", "session"),
     electronUserDataRoot: join(namespaceRoot, "user-data"),
     headlessIdentityPath: join(namespaceRoot, "runtime", "headless-root.json"),
+    installationRoot,
     installerObservationRoot: join(dataRoot, "observations", "installer"),
     logsRoot: join(namespaceRoot, "logs"),
     namespaceRoot,

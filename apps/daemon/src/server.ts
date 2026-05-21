@@ -195,6 +195,7 @@ import { observePendingInstallerApplyAttempts } from './update-apply-observation
 import {
   agentIdToTracking,
   deriveConfigureGlobals,
+  type ObservabilityEventRequest,
 } from '@open-design/contracts/analytics';
 import {
   redactSecrets,
@@ -4295,6 +4296,109 @@ export async function startServer({
         installationId: null,
       });
     }
+  });
+
+  // Cross-process safety-event bridge. Used by:
+  //   - Electron main process (renderer crash via render-process-gone)
+  //   - Any future helper / sidecar that needs to report a safety event
+  //     without owning its own posthog-node client
+  //
+  // The route DOES NOT check the user's analytics consent: this is the
+  // same "safety telemetry always flows" contract the web error-tracking
+  // module relies on. If POSTHOG_KEY is not set on the daemon (fork
+  // builds), captureSafety is a no-op on NOOP_SERVICE.
+  app.post('/api/observability/event', express.json({ limit: '64kb' }), (req, res) => {
+    const body = (req.body ?? {}) as Partial<ObservabilityEventRequest>;
+    const eventName = typeof body.event === 'string' ? body.event.trim() : '';
+    if (!eventName) {
+      res.status(400).json({ error: 'missing or invalid `event` field' });
+      return;
+    }
+    const properties =
+      body.properties != null && typeof body.properties === 'object' && !Array.isArray(body.properties)
+        ? (body.properties as Record<string, unknown>)
+        : {};
+    analyticsService.captureSafety({
+      eventName,
+      appVersion: cachedAppVersion?.version ?? '0.0.0',
+      properties,
+    });
+    res.json({ ok: true });
+  });
+
+  // Daemon-side uncaught errors. Without these, a crash in any daemon
+  // request handler or background task leaves no PostHog signal — the
+  // user sees a 500 (or worse, a connection drop) and we see nothing.
+  // Both listeners install AFTER the analyticsService is created so the
+  // captureSafety dispatch path is guaranteed to be ready.
+  //
+  // IMPORTANT — these handlers MUST keep Node's fatal-exit semantics.
+  // Installing an `uncaughtException` listener silences Node's default
+  // crash/exit path, and Node 15+ does the same for `unhandledRejection`
+  // when a listener is present (the `--unhandled-rejections=throw` mode
+  // only fires when nothing has subscribed). We bounded-flush posthog-
+  // node and then call `process.exit(1)` explicitly so the supervisor
+  // (pm2, packaged updater, dev `tools-dev`) gets a fresh process and
+  // we don't leave a half-broken daemon answering requests with state
+  // corruption. See codex review on PR #2527 (Siri-Ray).
+  const FATAL_FLUSH_TIMEOUT_MS = 1000;
+  let fatalShuttingDown = false;
+  const triggerFatalShutdown = (
+    eventName: string,
+    properties: Record<string, unknown>,
+  ): void => {
+    if (fatalShuttingDown) return;
+    fatalShuttingDown = true;
+    // CRITICAL — wait for captureSafety to ENQUEUE the event in
+    // posthog-node's local buffer before starting shutdown(). The
+    // captureSafety implementation does an `await readInstallationIdSafe()`
+    // before calling `client.capture()`; a sync fire-and-forget here would
+    // race shutdown() ahead of that await, drain an empty queue, and lose
+    // the crash event itself. See codex review on PR #2527 (Siri-Ray).
+    const flushSequence = (async () => {
+      try {
+        await analyticsService.captureSafety({
+          eventName,
+          appVersion: cachedAppVersion?.version ?? '0.0.0',
+          properties,
+        });
+      } catch {
+        // capture must never block the exit path
+      }
+      await analyticsService.shutdown();
+    })();
+    // Race the enqueue+shutdown sequence against a bounded timeout. If
+    // posthog-node hangs on a slow flush (or the installationId read
+    // hangs on the filesystem) we still die in bounded time — the
+    // supervisor will restart us, which is the whole point.
+    void Promise.race([
+      flushSequence,
+      new Promise<void>((resolve) => {
+        const handle = setTimeout(resolve, FATAL_FLUSH_TIMEOUT_MS);
+        handle.unref?.();
+      }),
+    ]).finally(() => {
+      process.exitCode = 1;
+      process.exit(1);
+    });
+  };
+  process.on('uncaughtException', (error) => {
+    triggerFatalShutdown('daemon_uncaught_exception', {
+      error_message: error?.message ?? String(error),
+      error_name: error?.name ?? 'Error',
+      // Stack truncation: 8 KB ceiling to keep the ingest payload bounded
+      // even when the stack contains huge native frames. Most actionable
+      // stacks fit in well under 2 KB.
+      error_stack: typeof error?.stack === 'string' ? error.stack.slice(0, 8192) : undefined,
+    });
+  });
+  process.on('unhandledRejection', (reason) => {
+    const asError = reason instanceof Error ? reason : null;
+    triggerFatalShutdown('daemon_unhandled_rejection', {
+      error_message: asError?.message ?? (typeof reason === 'string' ? reason : String(reason)),
+      error_name: asError?.name ?? 'NonErrorRejection',
+      error_stack: typeof asError?.stack === 'string' ? asError.stack.slice(0, 8192) : undefined,
+    });
   });
 
   // Tracks runs whose completion has already been forwarded to Langfuse so

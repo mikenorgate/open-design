@@ -16,6 +16,13 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 
+import {
+  readInstallationFile,
+  resolveInstallationDir,
+  writeInstallationFile,
+  type InstallationFilePatch,
+} from './installation.js';
+
 // Plugin-system env knobs. See docs/plans/plugins-implementation.md F6 / F9.
 // Phase 1 only reads them; the GC worker that enforces snapshot expiry lands
 // in Phase 5. Centralized here to keep daemon modules from sprinkling magic
@@ -326,6 +333,37 @@ function filterAllowedKeys(obj: Record<string, unknown>): AppConfigPrefs {
 }
 
 export async function readAppConfig(dataDir: string): Promise<AppConfigPrefs> {
+  const base = await readAppConfigFileOnly(dataDir);
+  // Channel-root installation file is the new authoritative source for the
+  // identity bits that must survive a namespace-scoped data-dir wipe. It
+  // lives outside `<namespace>/data/` so a reinstall of the same channel
+  // (which might churn the namespace token, or eventually clear per-
+  // namespace data) keeps the same id.
+  //
+  // Migration: when this daemon is the first to boot with installation.json
+  // support and finds an existing installationId in the legacy app-config
+  // path, mirror it forward exactly once so PostHog continues to see the
+  // same person across the 0.7.x → 0.8.0 upgrade. Without this mirror, the
+  // user count would double when 0.8.0 ships.
+  const installationDir = resolveInstallationDir(dataDir);
+  const installation = await readInstallationFile(installationDir);
+  if (typeof installation.installationId === 'string' && installation.installationId.length > 0) {
+    return { ...base, installationId: installation.installationId };
+  }
+  if (typeof base.installationId === 'string' && base.installationId.length > 0) {
+    // Best-effort migration. A write failure here doesn't break the read —
+    // we still serve the legacy id. The next write through writeAppConfig
+    // will retry the mirror.
+    try {
+      await writeInstallationFile(installationDir, { installationId: base.installationId });
+    } catch {
+      // swallow — observability beats correctness on this path
+    }
+  }
+  return base;
+}
+
+async function readAppConfigFileOnly(dataDir: string): Promise<AppConfigPrefs> {
   try {
     const raw = await readFile(configFile(dataDir), 'utf8');
     const parsed: unknown = JSON.parse(raw);
@@ -378,5 +416,26 @@ async function doWrite(
   const tmp = file + '.' + randomBytes(4).toString('hex') + '.tmp';
   await writeFile(tmp, JSON.stringify(next, null, 2), 'utf8');
   await rename(tmp, file);
+  // Mirror the identity bits to the channel-root installation file so they
+  // survive a namespace-scoped data-dir wipe. Only fires when the caller
+  // explicitly touched `installationId` (avoiding noisy writes on every
+  // unrelated app-config update). A write failure here doesn't roll back
+  // the app-config write — the next read merges them transparently.
+  if (Object.prototype.hasOwnProperty.call(partial, 'installationId')) {
+    const id = next.installationId;
+    // Caller explicitly touched installationId — mirror the outcome
+    // (including the clear case) to installation.json so a future read
+    // doesn't keep serving the old value out of the channel-root file.
+    // "Delete my data" relies on this clear path.
+    const installPatch: InstallationFilePatch = {
+      installationId: typeof id === 'string' && id.length > 0 ? id : null,
+    };
+    try {
+      await writeInstallationFile(resolveInstallationDir(dataDir), installPatch);
+    } catch {
+      // swallow — install file mirroring is best-effort; the canonical
+      // app-config write already succeeded.
+    }
+  }
   return next as AppConfigPrefs;
 }

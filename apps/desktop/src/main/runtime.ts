@@ -971,6 +971,36 @@ function checkOptionsFromHost(options: unknown): { autoDownload?: boolean } | un
   return { autoDownload: payload.autoDownload };
 }
 
+async function reportRendererCrash(
+  options: DesktopRuntimeOptions,
+  properties: { reason: string; exit_code: number | null },
+): Promise<void> {
+  try {
+    // discoverDaemonUrl returns the real http://127.0.0.1:<port> URL the
+    // sidecar daemon listens on. In tools-dev callers omit it and fall back
+    // to discoverUrl (which is also http in dev). In packaged builds it's
+    // mandatory because the renderer-only `od://app/` scheme isn't
+    // reachable from main-process Node fetch.
+    const baseUrl = (await (options.discoverDaemonUrl?.() ?? options.discoverUrl())) ?? null;
+    if (!baseUrl) return;
+    const url = new URL("/api/observability/event", baseUrl).toString();
+    await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        event: "desktop_renderer_crash",
+        properties: {
+          reason: properties.reason,
+          exit_code: properties.exit_code,
+        },
+      }),
+    });
+  } catch {
+    // Best-effort. The user is already in a degraded state — failing to
+    // report the crash must not cascade into another failure path.
+  }
+}
+
 export async function createDesktopRuntime(options: DesktopRuntimeOptions): Promise<DesktopRuntime> {
   const preloadPath = options.preloadPath ?? join(dirname(fileURLToPath(import.meta.url)), "preload.cjs");
   applyDockIcon();
@@ -1167,6 +1197,20 @@ export async function createDesktopRuntime(options: DesktopRuntimeOptions): Prom
   installWindowChromeCssHook(window);
   showWindowButtons(window);
   attachDownloadSaveAsDialog(window);
+
+  // Renderer-process crashes are completely invisible to the web bundle's
+  // own analytics surface (the renderer is dead — no JS can run, no
+  // window.error fires). The main process is the last layer that can
+  // observe them, so we forward the event to the daemon's safety-event
+  // bridge (`POST /api/observability/event`), which posts directly to
+  // PostHog with `device_id = installationId`. Best-effort: a failure to
+  // reach the daemon must not block the crash recovery flow.
+  window.webContents.on("render-process-gone", (_event, details) => {
+    void reportRendererCrash(options, {
+      reason: details.reason,
+      exit_code: typeof details.exitCode === "number" ? details.exitCode : null,
+    });
+  });
 
   const sendUpdaterStatus = (status = options.updater?.snapshot() ?? unavailableUpdaterStatus()) => {
     if (window.isDestroyed()) return;

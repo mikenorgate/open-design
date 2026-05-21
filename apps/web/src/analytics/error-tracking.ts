@@ -1,23 +1,33 @@
-// Direct-fetch exception reporter.
+// Direct-fetch safety telemetry transport.
 //
 // Why this exists alongside posthog-js's autocapture
 // ---------------------------------------------------
-// Two design constraints make posthog-js's built-in `capture_exceptions`
-// insufficient for our needs:
+// Two design constraints make posthog-js's normal capture path insufficient
+// for safety / reliability telemetry:
 //
-//   1. **Consent gate.** `posthog.opt_out_capturing()` silences ALL captures
-//      — including `$exception`. Product policy is that error reports flow
+//   1. **Consent gate.** `posthog.opt_out_capturing()` silences ALL captures.
+//      Product policy is that *safety* telemetry — exceptions, white
+//      screens, dropped chunks, long tasks, stuck runs — flows
 //      unconditionally so we don't lose ground truth on stability when a
 //      user opts out of general analytics. The user-facing copy in
 //      Settings → Privacy must reflect this.
 //
 //   2. **Lazy-load window.** posthog-js is dynamically `import()`-ed only
 //      after `/api/analytics/config` returns AND the user has consented.
-//      Errors thrown during the first 1-2 seconds (React hydration, early
-//      effects, route init, anything before posthog-js's loaded callback
-//      fires) are lost. We hook `window.error` / `unhandledrejection`
-//      synchronously at module load, before any of that, and buffer until
-//      we have credentials.
+//      Errors / metrics that fire during the first 1-2 seconds (React
+//      hydration, early effects, route init) are lost. We hook the
+//      relevant browser events synchronously at module load, before any
+//      of that, and buffer until we have credentials.
+//
+// This module exposes two surfaces:
+//
+//   - `reportHandledException` / `installErrorHandlers` — emit shaped
+//     `$exception` events (used directly + via `window.error` /
+//     `unhandledrejection`).
+//   - `reportSafetyEvent(eventName, properties)` — generic transport for
+//     non-exception observability events (long tasks, white screens,
+//     resource errors, boot timing, etc.) that need the same
+//     consent-bypass + early-buffer guarantees.
 //
 // To avoid duplicate `$exception` events, `client.ts` sets
 // `capture_exceptions: false` on the posthog-js init — this module is the
@@ -33,7 +43,8 @@ interface ExceptionTrackingContext {
   sessionId?: string;
 }
 
-interface BufferedException {
+interface BufferedSafetyEvent {
+  eventName: string;
   body: { properties: Record<string, unknown> };
   timestamp: string;
 }
@@ -45,7 +56,7 @@ interface BufferedException {
 const MAX_BUFFER_SIZE = 50;
 
 let context: ExceptionTrackingContext | null = null;
-const buffer: BufferedException[] = [];
+const buffer: BufferedSafetyEvent[] = [];
 let installed = false;
 
 export function setExceptionTrackingContext(next: ExceptionTrackingContext): void {
@@ -119,26 +130,49 @@ function captureException(
     handled: metadata.handled === true,
   };
 
-  const timestamp = new Date().toISOString();
-  const body = {
-    properties,
-    timestamp,
-  };
-
-  if (context == null) {
-    if (buffer.length >= MAX_BUFFER_SIZE) buffer.shift();
-    buffer.push({ body, timestamp });
-    return;
-  }
-
-  dispatch({ body, timestamp });
+  enqueue('$exception', properties);
 }
 
-function dispatch(item: BufferedException): void {
+// Generic safety-telemetry surface for non-exception observability events
+// (long tasks, white screens, resource errors, boot timing, stuck runs,
+// visibility changes, etc.). Goes through the same buffer + direct-fetch
+// transport as `$exception` so the same consent-bypass + early-firing
+// guarantees apply. Callers should namespace event names with `client_*`
+// (or `desktop_*` / `daemon_*` for cross-process forwards) so they're
+// easy to filter against posthog-js-captured product events.
+export function reportSafetyEvent(
+  eventName: string,
+  properties: Record<string, unknown> = {},
+): void {
+  const merged: Record<string, unknown> = {
+    ...properties,
+    $current_url: scrubUrl(typeof window !== 'undefined' ? window.location.href : ''),
+    $insert_id: randomId(),
+    capture_source: 'web/error-tracking',
+  };
+  enqueue(eventName, merged);
+}
+
+function enqueue(eventName: string, properties: Record<string, unknown>): void {
+  const timestamp = new Date().toISOString();
+  const item: BufferedSafetyEvent = {
+    eventName,
+    body: { properties },
+    timestamp,
+  };
+  if (context == null) {
+    if (buffer.length >= MAX_BUFFER_SIZE) buffer.shift();
+    buffer.push(item);
+    return;
+  }
+  dispatch(item);
+}
+
+function dispatch(item: BufferedSafetyEvent): void {
   if (context == null) return;
   const payload = {
     api_key: context.apiKey,
-    event: '$exception',
+    event: item.eventName,
     distinct_id: context.distinctId,
     properties: {
       ...item.body.properties,
@@ -149,8 +183,8 @@ function dispatch(item: BufferedException): void {
     timestamp: item.timestamp,
   };
   // `keepalive` ensures the request survives an immediate window unload —
-  // important for errors thrown during navigation that are followed by a
-  // route change a millisecond later.
+  // important for events that fire during navigation that are followed by
+  // a route change a millisecond later.
   try {
     void fetch(`${context.host.replace(/\/+$/, '')}/i/v0/e/`, {
       method: 'POST',
@@ -163,7 +197,7 @@ function dispatch(item: BufferedException): void {
       credentials: 'omit',
     });
   } catch {
-    // best-effort: error capture must never propagate
+    // best-effort: safety telemetry must never propagate
   }
 }
 

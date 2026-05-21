@@ -42,6 +42,7 @@ function detectClientType(): 'desktop' | 'web' | 'unknown' {
   return 'unknown';
 }
 import { parseSseFrame } from './sse';
+import { trackRunProgress, trackRunStart, trackRunTerminal } from '../observability/stuck-run';
 
 const MAX_TRANSCRIPT_MESSAGE_CHARS = 12_000;
 const LARGE_TOOL_RESULT_CHARS = 8_000;
@@ -293,6 +294,15 @@ export async function streamViaDaemon({
     const created = (await createResp.json()) as ChatRunCreateResponse;
     const runId = created.runId;
     onRunCreated?.(runId);
+    // Start the stuck-run watchdog. trackRunProgress is called inside the
+    // SSE consumer below on every event; trackRunTerminal fires when the
+    // stream resolves to a terminal state (or errors out).
+    trackRunStart(runId, {
+      agent_id: agentId,
+      project_id: projectId ?? undefined,
+      conversation_id: conversationId ?? undefined,
+      client_type: detectClientType(),
+    });
     notifyRunsChanged();
     emitRunStatus('queued');
     await consumeDaemonRun({
@@ -456,10 +466,12 @@ async function consumeDaemonRun({
           if (!parsed) continue;
           if (parsed.kind === 'comment') {
             sawStreamProgress = true;
+            trackRunProgress(runId);
             continue;
           }
           if (parsed.kind !== 'event') continue;
           sawStreamProgress = true;
+          trackRunProgress(runId);
           if (parsed.id) {
             lastEventId = parsed.id;
             onRunEventId?.(parsed.id);
@@ -573,6 +585,11 @@ async function consumeDaemonRun({
     handlers.onDone(acc);
   } finally {
     cancelSignal?.removeEventListener('abort', cancelRun);
+    // Settle the stuck-run watchdog with whatever terminal state we
+    // resolved. If the watchdog was never armed (reattach paths that
+    // hit the daemon for an already-finished run), trackRunTerminal
+    // is a no-op for unknown runIds.
+    trackRunTerminal(runId, endStatus ?? (canceled ? 'canceled' : 'unknown'));
   }
 }
 
