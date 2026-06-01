@@ -20,7 +20,7 @@ interface Props {
     id: string,
     choice: { model?: string; reasoning?: string },
   ) => void;
-  onApiModelChange: (model: string) => void;
+  onApiModelChange?: (model: string) => void;
   providerModelsCache?: Record<string, ProviderModelOption[]>;
   onOpenSettings: () => void;
   onRefreshAgents: () => void;
@@ -94,9 +94,10 @@ export function AvatarMenu({
     (m) => m.id === currentModelId,
   )?.label;
 
-  const byokProvider = KNOWN_PROVIDERS.find((provider) => provider.protocol === config.apiProtocol);
+  const apiProtocol = config.apiProtocol ?? 'openai';
+  const byokProvider = KNOWN_PROVIDERS.find((provider) => provider.protocol === apiProtocol);
   const byokProviderModelsKey = providerModelsCacheKey(
-    config.apiProtocol,
+    apiProtocol,
     config.baseUrl ?? '',
     config.apiKey ?? '',
     config.apiVersion ?? '',
@@ -104,7 +105,7 @@ export function AvatarMenu({
   const fetchedByokModels = providerModelsCache?.[byokProviderModelsKey] ?? [];
   const byokModelOptions = mergeProviderModelOptions(
     fetchedByokModels,
-    SUGGESTED_MODELS_BY_PROTOCOL[config.apiProtocol] ?? [],
+    SUGGESTED_MODELS_BY_PROTOCOL[apiProtocol] ?? [],
   );
 
   return (
@@ -324,14 +325,14 @@ export function AvatarMenu({
                 <SearchableModelSelect
                   className="inline-switcher__select avatar-select"
                   value={config.model ?? ''}
-                  onChange={(value) => onApiModelChange(value)}
+                  onChange={(value) => onApiModelChange?.(value)}
                   models={byokModelOptions.map((m) => ({ id: m.id, label: m.label }))}
                   additionalOptions={
                     config.model && !byokModelOptions.some((m) => m.id === config.model)
                       ? [
                           {
                             value: config.model,
-                            label: byokProvider && byokProvider.models.includes(config.model)
+                            label: byokProvider?.models?.includes(config.model)
                               ? config.model
                               : `${config.model} ${t('avatar.customSuffix')}`,
                           },

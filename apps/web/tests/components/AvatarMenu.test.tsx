@@ -40,8 +40,9 @@ const daemonConfig: AppConfig = {
   apiVersion: '',
   model: '',
   byokImageModel: '',
-  reasoningSummary: 'auto',
   agentId: 'codex',
+  skillId: null,
+  designSystemId: null,
   agentModels: { codex: { model: 'gpt-5.4' } },
 };
 

@@ -127,6 +127,7 @@ import type {
   ProjectTemplate,
   LiveArtifactEventItem,
   LiveArtifactSummary,
+  ProviderModelOption,
   SkillSummary,
 } from '../types';
 import { historyWithApiAttachmentContext } from '../api-attachment-context';
@@ -214,7 +215,7 @@ interface Props {
     id: string,
     choice: { model?: string; reasoning?: string },
   ) => void;
-  onApiModelChange: (model: string) => void;
+  onApiModelChange?: (model: string) => void;
   providerModelsCache?: Record<string, ProviderModelOption[]>;
   onRefreshAgents: () => void;
   onOpenSettings: (section?: SettingsSection) => void;
