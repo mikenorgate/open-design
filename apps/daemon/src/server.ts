@@ -265,6 +265,7 @@ import {
   deriveLangfuseDeliveryState,
   readTelemetrySinkConfig,
 } from './langfuse-trace.js';
+import { buildPromptStackTelemetry } from './prompt-telemetry.js';
 import {
   createAnalyticsService,
   newInsertId,
@@ -10618,7 +10619,19 @@ export async function startServer({
     // `listSkills()` scan in `startChatRun`. critiqueShouldRun threads
     // the same panel-eligibility decision down to the spawn-path
     // orchestrator gate so prompt and orchestrator stay in lockstep.
-    return { prompt, activeSkillDir, activeSkillDirs, critiqueShouldRun };
+    return {
+      prompt,
+      activeSkillDir,
+      activeSkillDirs,
+      critiqueShouldRun,
+      promptTelemetryParts: {
+        skillPrompt: skillBody ?? '',
+        designSystemPrompt: designSystemBody ?? '',
+        pluginStagePrompt: [pluginBlock, ...(activeStageBlocks ?? [])]
+          .filter((part) => typeof part === 'string' && part.trim().length > 0)
+          .join('\n\n---\n\n'),
+      },
+    };
   };
 
   // Plan §3.I1 / §3.D / spec §10.1: fire the pipeline schedule on a
@@ -10980,6 +10993,7 @@ export async function startServer({
       prompt: daemonSystemPrompt,
       activeSkillDirs,
       critiqueShouldRun,
+      promptTelemetryParts,
     } =
       await composeDaemonSystemPrompt({
         agentId,
@@ -11136,6 +11150,52 @@ export async function startServer({
         ? `\n\n${promptImagePaths.map((p) => `@${p}`).join(' ')}`
         : '',
     ].join('');
+    run.promptTelemetry = buildPromptStackTelemetry({
+      composedPrompt: composed,
+      sections: [
+        { kind: 'formOverride', content: formOverride },
+        // Phase 1 explicitly needs redactedContent for these aggregate prompts:
+        // they are the quickest way to inspect the system context sent to the
+        // model when diagnosing Langfuse traces.
+        { kind: 'daemonSystemPrompt', content: daemonSystemPrompt },
+        { kind: 'runtimeToolPrompt', content: runtimeToolPrompt },
+        { kind: 'researchCommandContract', content: researchCommandContract },
+        { kind: 'runContextPrompt', content: runContextPrompt },
+        { kind: 'clientSystemPrompt', content: clientInstructionPrompt },
+        { kind: 'echoGuard', content: ECHO_GUARD },
+        { kind: 'userRequest', content: userRequestPrompt },
+        { kind: 'skillPrompt', content: promptTelemetryParts?.skillPrompt },
+        {
+          kind: 'designSystemPrompt',
+          content: promptTelemetryParts?.designSystemPrompt,
+        },
+        {
+          kind: 'pluginStagePrompt',
+          content: promptTelemetryParts?.pluginStagePrompt,
+        },
+        { kind: 'cwdHint', content: cwdHint, metadata: cwd ? [cwd] : [] },
+        {
+          kind: 'linkedDirsHint',
+          content: linkedDirsHint,
+          metadata: linkedDirs,
+        },
+        {
+          kind: 'attachments',
+          content: attachmentHint,
+          metadata: safeAttachments,
+        },
+        {
+          kind: 'commentAttachments',
+          content: commentHint,
+          metadata: safeCommentAttachments,
+        },
+        {
+          kind: 'promptImagePaths',
+          content: promptImagePaths.join('\n'),
+          metadata: promptImagePaths,
+        },
+      ],
+    });
     // Per-agent model + reasoning the user picked in the model menu.
     // Trust the value when it matches the most recent /api/agents listing
     // (live or fallback). Otherwise allow it through if it passes a
