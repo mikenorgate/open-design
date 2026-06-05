@@ -16,7 +16,10 @@
       "development": "./src/index.ts",
       "default": "./dist/index.mjs"
     },
-    "./styles.css": "./src/styles.css"
+    "./styles.css": {
+      "style": "./src/styles.css",
+      "default": "./src/styles.css"
+    }
   },
   "scripts": {
     "build": "tsx ./esbuild.config.ts && tsc -p tsconfig.json --emitDeclarationOnly",
