@@ -6,8 +6,8 @@
 
 import type { Express } from 'express';
 import nodePath from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
 import type { RouteDeps } from '../server-context.js';
-import { readFileSync } from 'node:fs';
 import { discoverAppDevServer, discoverDevServer, buildDevServerCommand, DevServerNotDetectedError } from './discovery.js';
 import { getDevServerRunner } from './runner.js';
 import { discoverComponents } from './components.js';
@@ -30,6 +30,43 @@ import type {
 
 export interface RegisterDevServerRoutesDeps
   extends RouteDeps<'db' | 'http' | 'paths' | 'projectStore' | 'projectFiles'> {}
+
+/** Parse a .env-style file into a key/value record, ignoring comments and blank lines. */
+function parseEnvFile(filePath: string): Record<string, string> {
+  try {
+    const text = readFileSync(filePath, 'utf8');
+    const result: Record<string, string> = {};
+    for (const rawLine of text.split('\n')) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+      const eqIdx = line.indexOf('=');
+      if (eqIdx < 1) continue;
+      const key = line.slice(0, eqIdx).trim();
+      let val = line.slice(eqIdx + 1).trim();
+      // Strip surrounding quotes
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      result[key] = val;
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+/** Load env vars from the project directory (.env, .env.local) into the current process env. */
+function loadProjectEnv(projectDir: string): NodeJS.ProcessEnv {
+  const files = ['.env', '.env.local'];
+  const merged: Record<string, string> = {};
+  for (const file of files) {
+    const filePath = nodePath.join(projectDir, file);
+    if (existsSync(filePath)) {
+      Object.assign(merged, parseEnvFile(filePath));
+    }
+  }
+  return { ...process.env, ...merged };
+}
 
 export function registerDevServerRoutes(app: Express, ctx: RegisterDevServerRoutesDeps) {
   const { db } = ctx;
@@ -84,6 +121,7 @@ export function registerDevServerRoutes(app: Express, ctx: RegisterDevServerRout
       const built = buildDevServerCommand(discovery, port ?? 0);
 
       const runner = getDevServerRunner();
+      const projectEnv = loadProjectEnv(baseDir);
       const handle = await runner.start({
         projectId,
         projectDir: baseDir,
@@ -92,6 +130,7 @@ export function registerDevServerRoutes(app: Express, ctx: RegisterDevServerRout
         portPlaceholder: discovery.portPlaceholder,
         framework: discovery.framework,
         packageManager: discovery.packageManager,
+        env: projectEnv,
       });
 
       if (discovery.framework === 'storybook') {
@@ -107,6 +146,7 @@ export function registerDevServerRoutes(app: Express, ctx: RegisterDevServerRout
               portPlaceholder: appDiscovery.portPlaceholder,
               framework: appDiscovery.framework,
               packageManager: appDiscovery.packageManager,
+              env: projectEnv,
             });
           } catch (err) {
             console.warn(`[dev-server] Could not start auxiliary app server for project ${projectId}:`, err instanceof Error ? err.message : err);
@@ -180,6 +220,7 @@ export function registerDevServerRoutes(app: Express, ctx: RegisterDevServerRout
       const built = buildDevServerCommand(discovery, body.port ?? 0);
 
       const runner = getDevServerRunner();
+      const projectEnv = loadProjectEnv(baseDir);
       const handle = await runner.restart(projectId, {
         projectId,
         projectDir: baseDir,
@@ -188,6 +229,7 @@ export function registerDevServerRoutes(app: Express, ctx: RegisterDevServerRout
         portPlaceholder: discovery.portPlaceholder,
         framework: discovery.framework,
         packageManager: discovery.packageManager,
+        env: projectEnv,
       });
 
       await runner.stop(`${projectId}:app`);
@@ -204,6 +246,7 @@ export function registerDevServerRoutes(app: Express, ctx: RegisterDevServerRout
               portPlaceholder: appDiscovery.portPlaceholder,
               framework: appDiscovery.framework,
               packageManager: appDiscovery.packageManager,
+              env: projectEnv,
             });
           } catch (err) {
             console.warn(`[dev-server] Could not start auxiliary app server for project ${projectId}:`, err instanceof Error ? err.message : err);

@@ -280,7 +280,6 @@ function injectBridges(
   });
   window.addEventListener('popstate', scheduleReactContext);
   window.addEventListener('load', scheduleReactContext);
-  try{window.history.replaceState(window.history.state,document.title,'/');}catch(_){}
 })();</scr` + `ipt>`
     : '';
   const config = `${appPreviewRootShim}<script data-od-dev-proxy-config>window.__OD_DEV_PROXY_WS_BASE__=${JSON.stringify(proxyWsBase)};</scr` + `ipt>`;
@@ -692,6 +691,16 @@ async function proxyHttpRequest(
     }
 
     res.statusCode = proxyRes.statusCode ?? 200;
+
+    // Rewrite Location headers on 3xx redirects so the browser stays within
+    // the proxy prefix instead of navigating to a bare path on the OD daemon.
+    const statusCode = proxyRes.statusCode ?? 200;
+    if (statusCode >= 300 && statusCode < 400) {
+      const location = res.getHeader('location');
+      if (typeof location === 'string' && location.startsWith('/') && !location.startsWith(proxyBasePath)) {
+        res.setHeader('location', proxyBasePath + location);
+      }
+    }
 
     if (isRewriteableText && proxyRes.statusCode && proxyRes.statusCode < 400) {
       const chunks: Buffer[] = [];
