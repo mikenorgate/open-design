@@ -66,6 +66,7 @@ import { createTerminal, killTerminal } from '../state/projects';
 import type { QuestionForm } from '../artifacts/question-form';
 import { DesignFilesPanel, type DesignFilesNavState } from './DesignFilesPanel';
 import { DevServerControls } from './DevServerControls';
+import { PreviewDrawOverlay } from './PreviewDrawOverlay';
 import { DesignBrowserPanel, labelFromUrl, type BrowserPageInfo } from './DesignBrowserPanel';
 import type { PluginFolderAgentAction } from './design-files/pluginFolderActions';
 import { designSystemGithubEvidenceState, repoConnectCopy } from './design-system-github-evidence';
@@ -4208,7 +4209,16 @@ function AppPreviewTab({
         </div>
       </div>
       <div className="production-react-preview-body">
-        <iframe ref={iframeRef} key={`${reloadKey}-${localReloadKey}`} className="production-react-preview-frame" data-od-active="true" data-od-render-mode="url-load" title="App Preview" src={src} sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads" onLoad={() => syncPreviewModes()} />
+        <PreviewDrawOverlay
+          active={drawMode}
+          onActiveChange={setDrawMode}
+          captureTarget={null}
+          filePath={APP_PREVIEW_COMMENT_FILE_PATH}
+          sendDisabled={Boolean(streaming || commentSendDisabled)}
+          sendDisabledReason="A task is currently running"
+        >
+          <iframe ref={iframeRef} key={`${reloadKey}-${localReloadKey}`} className="production-react-preview-frame" data-od-active="true" data-od-render-mode="url-load" title="App Preview" src={src} sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads" onLoad={() => syncPreviewModes()} />
+        </PreviewDrawOverlay>
         {selectedTarget ? (
           <div className="production-react-inspect-card">
             <div><strong>{commentMode ? 'Comment target' : selectedTarget.tagName || 'element'}</strong><code>{selectedTarget.elementId}</code></div>
