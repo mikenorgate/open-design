@@ -282,6 +282,28 @@ export interface ChatAttachment {
   order?: number;
 }
 
+export interface ChatProductionReactSourceLocation {
+  file?: string | null;
+  line?: number | null;
+  column?: number | null;
+}
+
+export interface ChatProductionReactComponentContext {
+  name: string;
+  count?: number;
+  minDepth?: number;
+  source?: ChatProductionReactSourceLocation | null;
+}
+
+export interface ChatProductionReactContext {
+  route?: string;
+  title?: string;
+  /** React owner/component stack for the selected DOM element, nearest owner first when available. */
+  componentStack?: ChatProductionReactComponentContext[];
+  /** Visible component summary for the active app page at selection time. */
+  pageComponents?: ChatProductionReactComponentContext[];
+}
+
 export interface ChatCommentAttachment {
   id: string;
   order: number;
@@ -304,6 +326,8 @@ export interface ChatCommentAttachment {
   markKind?: PreviewVisualMarkKind;
   intent?: string;
   imageAttachments?: PreviewCommentAttachment[];
+  /** Production React route/component context captured from App Preview or Storybook at selection time. */
+  reactContext?: ChatProductionReactContext;
   /** `'query'` means `comment` was promoted to the message text; keep target data as context only. */
   commentContext?: 'context' | 'query';
   source?: 'saved-comment' | 'board-batch';

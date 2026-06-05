@@ -4066,18 +4066,13 @@ type AppPreviewTarget = {
   htmlHint?: string;
   position: { x: number; y: number; width: number; height: number };
   style?: Record<string, string>;
-  react?: {
-    route?: string;
-    title?: string;
-    componentStack?: { name: string; source?: { file?: string | null; line?: number | null; column?: number | null } | null }[];
-    pageComponents?: { name: string; count?: number; minDepth?: number; source?: { file?: string | null; line?: number | null; column?: number | null } | null }[];
-  };
+  react?: ChatCommentAttachment['reactContext'];
 };
 
 export interface AppPreviewPageContext {
   route: string;
   title?: string;
-  components: { name: string; count?: number; minDepth?: number; source?: { file?: string | null; line?: number | null; column?: number | null } | null }[];
+  components: NonNullable<NonNullable<ChatCommentAttachment['reactContext']>['pageComponents']>;
 }
 
 function AppPreviewTab({
@@ -4148,13 +4143,32 @@ function AppPreviewTab({
     return () => window.removeEventListener('message', onMessage);
   }, [onAppPreviewContextChange]);
 
+  function reactContextForTarget(target: AppPreviewTarget): ChatCommentAttachment['reactContext'] | undefined {
+    const pageComponents = target.react?.pageComponents?.length
+      ? target.react.pageComponents
+      : pageContext?.components;
+    const context: NonNullable<ChatCommentAttachment['reactContext']> = {
+      route: target.react?.route || pageContext?.route,
+      title: target.react?.title || pageContext?.title,
+      componentStack: target.react?.componentStack,
+      pageComponents,
+    };
+    if (
+      !context.route
+      && !context.title
+      && (!context.componentStack || context.componentStack.length === 0)
+      && (!context.pageComponents || context.pageComponents.length === 0)
+    ) return undefined;
+    return context;
+  }
+
   function sendAppComment(action: 'queue' | 'send') {
     if (!selectedTarget || !commentDraft.trim() || !onSendBoardCommentAttachments || sendingComment) return;
     if (action === 'send' && commentSendDisabled) return;
     setSendingComment(true); setCommentError(null);
     try {
       const target: PreviewCommentTarget = { filePath: APP_PREVIEW_COMMENT_FILE_PATH, elementId: selectedTarget.elementId, selector: selectedTarget.selector, label: selectedTarget.label || selectedTarget.tagName || selectedTarget.elementId, text: selectedTarget.text || '', position: selectedTarget.position, htmlHint: selectedTarget.htmlHint || '', selectionKind: 'element' };
-      const attachments: ChatCommentAttachment[] = [{ id: `${target.elementId}-board-1`, order: 1, filePath: target.filePath, elementId: target.elementId, selector: target.selector, label: target.label, comment: commentDraft.trim(), currentText: (target.text || '').slice(0, 160), pagePosition: target.position, htmlHint: target.htmlHint, selectionKind: 'element', source: 'board-batch' }];
+      const attachments: ChatCommentAttachment[] = [{ id: `${target.elementId}-board-1`, order: 1, filePath: target.filePath, elementId: target.elementId, selector: target.selector, label: target.label, comment: commentDraft.trim(), currentText: (target.text || '').slice(0, 160), pagePosition: target.position, htmlHint: target.htmlHint, selectionKind: 'element', reactContext: reactContextForTarget(selectedTarget), source: 'board-batch' }];
       const result = onSendBoardCommentAttachments(attachments);
       const finish = () => { setCommentDraft(''); setSelectedTarget(null); if (!commentQueueOnSend || action === 'send') setCommentMode(false); };
       if (result instanceof Promise) { result.then(() => finish()).catch(() => {}); } else { finish(); }

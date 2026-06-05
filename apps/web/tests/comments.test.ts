@@ -415,6 +415,42 @@ describe('preview comment attachment helpers', () => {
     expect(content).toContain('ask the user before proceeding');
   });
 
+  it('serializes App Preview React context for the selected element', () => {
+    const attachment = commentAttachment({
+      filePath: 'App Preview (live React app)',
+      elementId: 'login-button',
+      selector: '[data-od-id="login-button"]',
+      label: 'Log In',
+      comment: 'Make this primary action clearer',
+      currentText: 'Log In',
+      htmlHint: '<button data-od-id="login-button">Log In</button>',
+      reactContext: {
+        route: '/login',
+        title: 'Agentic Home',
+        componentStack: [
+          { name: 'LoginForm', source: { file: 'src/routes/login.tsx', line: 42, column: 7 } },
+          { name: 'AuthLayout', source: { file: 'src/components/AuthLayout.tsx', line: 11 } },
+        ],
+        pageComponents: [
+          { name: 'LoginForm', count: 1, minDepth: 5, source: { file: 'src/routes/login.tsx', line: 20 } },
+          { name: 'AuthProvider', count: 1, minDepth: 1, source: { file: 'src/providers/AuthProvider.tsx' } },
+        ],
+      },
+    });
+
+    const content = messageContentWithCommentAttachments('', [attachment]);
+
+    expect(content).toContain('sourceType: production-react-component-or-page');
+    expect(content).toContain('react.route: /login');
+    expect(content).toContain('react.title: Agentic Home');
+    expect(content).toContain('react.selectedElementComponentStack:');
+    expect(content).toContain('react.stack.1: LoginForm @ src/routes/login.tsx:42:7');
+    expect(content).toContain('react.stack.2: AuthLayout @ src/components/AuthLayout.tsx:11');
+    expect(content).toContain('react.visiblePageComponents:');
+    expect(content).toContain('react.pageComponent.1: LoginForm @ src/routes/login.tsx:20 count=1 minDepth=5');
+    expect(content).toContain('react.pageComponent.2: AuthProvider @ src/providers/AuthProvider.tsx count=1 minDepth=1');
+  });
+
   it('adds hidden comment context only to the current user message sent to API providers', () => {
     const attachments = commentsToAttachments([
       comment({ id: 'c1', elementId: 'hero-title', note: 'Make it bolder' }),

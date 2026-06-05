@@ -437,7 +437,48 @@ export function trimHtmlHint(value: string): string {
 }
 
 function isProductionReactCommentAttachment(item: ChatCommentAttachment): boolean {
-  return /\.[jt]sx$/i.test(item.filePath) || /live React app/i.test(item.filePath);
+  return /\.[jt]sx$/i.test(item.filePath) || /live React app/i.test(item.filePath) || Boolean(item.reactContext);
+}
+
+function formatReactSourceLocation(
+  source: NonNullable<NonNullable<ChatCommentAttachment['reactContext']>['componentStack']>[number]['source'],
+): string {
+  if (!source?.file) return '';
+  const line = typeof source.line === 'number' && Number.isFinite(source.line) ? `:${Math.round(source.line)}` : '';
+  const column = typeof source.column === 'number' && Number.isFinite(source.column) ? `:${Math.round(source.column)}` : '';
+  return `${source.file}${line}${column}`;
+}
+
+function formatReactComponentContext(
+  component: NonNullable<NonNullable<ChatCommentAttachment['reactContext']>['componentStack']>[number],
+): string {
+  const name = String(component.name || '').trim() || '(anonymous)';
+  const source = formatReactSourceLocation(component.source);
+  const count = typeof component.count === 'number' && Number.isFinite(component.count) ? ` count=${Math.round(component.count)}` : '';
+  const depth = typeof component.minDepth === 'number' && Number.isFinite(component.minDepth) ? ` minDepth=${Math.round(component.minDepth)}` : '';
+  return `${name}${source ? ` @ ${source}` : ''}${count}${depth}`;
+}
+
+function pushReactContextLines(lines: string[], item: ChatCommentAttachment): void {
+  const context = item.reactContext;
+  if (!context) return;
+  lines.push('reactContext:');
+  if (context.route) lines.push(`react.route: ${context.route}`);
+  if (context.title) lines.push(`react.title: ${context.title}`);
+  const stack = (context.componentStack ?? []).filter((component) => String(component.name || '').trim()).slice(0, 8);
+  if (stack.length > 0) {
+    lines.push('react.selectedElementComponentStack:');
+    stack.forEach((component, index) => {
+      lines.push(`react.stack.${index + 1}: ${formatReactComponentContext(component)}`);
+    });
+  }
+  const pageComponents = (context.pageComponents ?? []).filter((component) => String(component.name || '').trim()).slice(0, 16);
+  if (pageComponents.length > 0) {
+    lines.push('react.visiblePageComponents:');
+    pageComponents.forEach((component, index) => {
+      lines.push(`react.pageComponent.${index + 1}: ${formatReactComponentContext(component)}`);
+    });
+  }
 }
 
 function renderCommentAttachmentContext(commentAttachments: ChatCommentAttachment[]): string {
@@ -469,6 +510,7 @@ function renderCommentAttachmentContext(commentAttachments: ChatCommentAttachmen
       `htmlHint: ${trimHtmlHint(item.htmlHint || '') || '(none)'}`,
       `computedStyle: ${formatAnnotationStyle(item.style) || '(none)'}`,
     );
+    pushReactContextLines(lines, item);
     if (item.comment && item.commentContext !== 'query') {
       lines.push(`comment: ${item.comment}`);
     }
