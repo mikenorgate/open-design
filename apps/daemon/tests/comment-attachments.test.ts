@@ -461,6 +461,48 @@ describe('preview comment agent payload', () => {
     expect(hint).toContain('ask the user before proceeding');
   });
 
+  it('preserves App Preview React context in the daemon prompt hint', () => {
+    const normalized = normalizeCommentAttachments([
+      commentAttachment({
+        id: 'app-preview-login-button',
+        filePath: 'App Preview (live React app)',
+        elementId: 'login-button',
+        selector: '[data-od-id="login-button"]',
+        label: 'Sign in',
+        comment: '',
+        commentContext: 'query',
+        currentText: 'Sign in',
+        htmlHint: '<button data-od-id="login-button">Sign in</button>',
+        reactContext: {
+          route: '/login',
+          title: 'Agentic Home',
+          componentStack: [
+            { name: 'LoginForm', source: { file: 'src/routes/login.tsx', line: 42, column: 7 } },
+            { name: 'AuthLayout', source: { file: 'src/components/AuthLayout.tsx', line: 11 } },
+          ],
+          pageComponents: [
+            { name: 'LoginForm', count: 1, minDepth: 5, source: { file: 'src/routes/login.tsx', line: 20 } },
+            { name: 'AuthProvider', count: 1, minDepth: 1, source: { file: 'src/providers/AuthProvider.tsx' } },
+          ],
+        },
+      }),
+    ]);
+
+    const hint = renderCommentAttachmentHint(normalized);
+
+    expect(normalized[0]?.reactContext).toBeDefined();
+    expect(hint).toContain('file: App Preview (live React app)');
+    expect(hint).toContain('sourceType: production-react-component-or-page');
+    expect(hint).toContain('selector: [data-od-id="login-button"]');
+    expect(hint).toContain('currentText: Sign in');
+    expect(hint).toContain('htmlHint: <button data-od-id="login-button">Sign in</button>');
+    expect(hint).toContain('react.route: /login');
+    expect(hint).toContain('react.stack.1: LoginForm @ src/routes/login.tsx:42:7');
+    expect(hint).toContain('react.stack.2: AuthLayout @ src/components/AuthLayout.tsx:11');
+    expect(hint).toContain('react.pageComponent.1: LoginForm @ src/routes/login.tsx:20 count=1 minDepth=5');
+    expect(hint).not.toContain('comment:');
+  });
+
   it('keeps image attachments in saved comment payloads without requiring a note', () => {
     const normalized = normalizeCommentAttachments([
       commentAttachment({

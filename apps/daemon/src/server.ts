@@ -903,12 +903,98 @@ export function normalizeCommentAttachments(input) {
           ? intent || visualAnnotationIntent(markKind)
           : undefined,
         imageAttachments: imageAttachments.length > 0 ? imageAttachments : undefined,
+        reactContext: normalizeReactCommentContext(raw.reactContext),
         commentContext,
         source: raw.source === 'board-batch' ? 'board-batch' : 'saved-comment',
       };
     })
     .filter(Boolean)
     .sort((a, b) => a.order - b.order);
+}
+
+function normalizeReactSourceLocation(input) {
+  if (!input || typeof input !== 'object') return null;
+  const file = compactString(input.file, 220);
+  return {
+    file: file || null,
+    line: Number.isFinite(input.line) ? Math.max(0, Math.round(input.line)) : null,
+    column: Number.isFinite(input.column) ? Math.max(0, Math.round(input.column)) : null,
+  };
+}
+
+function normalizeReactComponentContextList(input, maxItems) {
+  if (!Array.isArray(input)) return [];
+  return input
+    .map((raw) => {
+      if (!raw || typeof raw !== 'object') return null;
+      const name = compactString(raw.name, 120);
+      if (!name) return null;
+      return {
+        name,
+        count: Number.isFinite(raw.count) ? Math.max(0, Math.round(raw.count)) : undefined,
+        minDepth: Number.isFinite(raw.minDepth) ? Math.max(0, Math.round(raw.minDepth)) : undefined,
+        source: normalizeReactSourceLocation(raw.source),
+      };
+    })
+    .filter(Boolean)
+    .slice(0, maxItems);
+}
+
+function normalizeReactCommentContext(input) {
+  if (!input || typeof input !== 'object') return undefined;
+  const context = {
+    route: compactString(input.route, 220),
+    title: compactString(input.title, 160),
+    componentStack: normalizeReactComponentContextList(input.componentStack, 12),
+    pageComponents: normalizeReactComponentContextList(input.pageComponents, 120),
+  };
+  if (
+    !context.route
+    && !context.title
+    && context.componentStack.length === 0
+    && context.pageComponents.length === 0
+  ) return undefined;
+  return context;
+}
+
+function formatReactSourceLocation(source) {
+  if (!source?.file) return '';
+  const line = Number.isFinite(source.line) && source.line > 0 ? `:${Math.round(source.line)}` : '';
+  const column = Number.isFinite(source.column) && source.column > 0 ? `:${Math.round(source.column)}` : '';
+  return `${source.file}${line}${column}`;
+}
+
+function formatReactComponentContext(component) {
+  const source = formatReactSourceLocation(component.source);
+  const count = Number.isFinite(component.count) ? ` count=${Math.round(component.count)}` : '';
+  const depth = Number.isFinite(component.minDepth) ? ` minDepth=${Math.round(component.minDepth)}` : '';
+  return `${component.name}${source ? ` @ ${source}` : ''}${count}${depth}`;
+}
+
+function isProductionReactCommentAttachment(item) {
+  return /\.[jt]sx$/i.test(item.filePath) || /live React app/i.test(item.filePath) || Boolean(item.reactContext);
+}
+
+function pushReactCommentContextLines(lines, item) {
+  const context = item.reactContext;
+  if (!context) return;
+  lines.push('reactContext:');
+  if (context.route) lines.push(`react.route: ${context.route}`);
+  if (context.title) lines.push(`react.title: ${context.title}`);
+  const stack = Array.isArray(context.componentStack) ? context.componentStack.slice(0, 8) : [];
+  if (stack.length > 0) {
+    lines.push('react.selectedElementComponentStack:');
+    stack.forEach((component, index) => {
+      lines.push(`react.stack.${index + 1}: ${formatReactComponentContext(component)}`);
+    });
+  }
+  const pageComponents = Array.isArray(context.pageComponents) ? context.pageComponents.slice(0, 16) : [];
+  if (pageComponents.length > 0) {
+    lines.push('react.visiblePageComponents:');
+    pageComponents.forEach((component, index) => {
+      lines.push(`react.pageComponent.${index + 1}: ${formatReactComponentContext(component)}`);
+    });
+  }
 }
 
 export function renderCommentAttachmentHint(commentAttachments) {
@@ -927,12 +1013,14 @@ export function renderCommentAttachmentHint(commentAttachments) {
       `${item.order}. ${item.elementId}`,
       `targetKind: ${targetKind}`,
       `file: ${item.filePath}`,
+      isProductionReactCommentAttachment(item) ? 'sourceType: production-react-component-or-page' : 'sourceType: generated-preview-artifact',
       `label: ${item.label || '(unlabeled)'}`,
       `position: ${formatAttachmentPosition(item.pagePosition)}`,
       `currentText: ${item.currentText || '(empty)'}`,
       `htmlHint: ${item.htmlHint || '(none)'}`,
       `computedStyle: ${formatAnnotationStyle(item.style) || '(none)'}`,
     );
+    pushReactCommentContextLines(lines, item);
     if (item.comment && item.commentContext !== 'query') {
       lines.push(`comment: ${item.comment}`);
     }
