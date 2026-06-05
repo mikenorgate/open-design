@@ -23,7 +23,11 @@ import type {
   RestoreProjectFileVersionResponse,
   SocialShareRequest,
   SocialShareResponse,
+  DevServerStatusResponse,
+  DevServerStartResponse,
+  DevServerStopResponse,
 } from '@open-design/contracts';
+import { devServerProxyPath } from '@open-design/contracts';
 import type {
   AgentInfo,
   AppVersionInfo,
@@ -2216,6 +2220,60 @@ export async function renameProjectFile(
     throw new Error(errorBody.message);
   }
   return (await resp.json()) as RenameProjectFileResponse;
+}
+
+export async function fetchProjectDevServerStatus(
+  projectId: string,
+): Promise<DevServerStatusResponse> {
+  const resp = await fetch(
+    `/api/projects/${encodeURIComponent(projectId)}/dev-server/status`,
+    { cache: 'no-store' },
+  );
+  if (!resp.ok) {
+    const body = await readApiErrorBody(resp);
+    throw new Error(body.message);
+  }
+  return (await resp.json()) as DevServerStatusResponse;
+}
+
+export async function startProjectDevServer(
+  projectId: string,
+): Promise<DevServerStartResponse> {
+  const resp = await fetch(
+    `/api/projects/${encodeURIComponent(projectId)}/dev-server/start`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    },
+  );
+  if (!resp.ok) {
+    const body = await readApiErrorBody(resp);
+    throw new Error(body.message);
+  }
+  return (await resp.json()) as DevServerStartResponse;
+}
+
+export async function stopProjectDevServer(
+  projectId: string,
+): Promise<DevServerStopResponse> {
+  const resp = await fetch(
+    `/api/projects/${encodeURIComponent(projectId)}/dev-server/stop`,
+    { method: 'POST' },
+  );
+  if (!resp.ok) {
+    const body = await readApiErrorBody(resp);
+    throw new Error(body.message);
+  }
+  return (await resp.json()) as DevServerStopResponse;
+}
+
+export function projectDevServerProxyUrl(projectId: string): string {
+  return devServerProxyPath(projectId, '/');
+}
+
+export function projectDevServerAppProxyUrl(projectId: string): string {
+  return `/api/projects/${encodeURIComponent(projectId)}/dev-server/app-proxy/`;
 }
 
 export async function openFolderDialog(options: { throwOnError?: boolean } = {}): Promise<string | null> {

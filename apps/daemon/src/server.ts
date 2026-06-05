@@ -604,6 +604,9 @@ import { registerDeployRoutes, registerDeploymentCheckRoutes } from './routes/de
 import { registerMediaRoutes } from './routes/media.js';
 import { registerProjectRoutes, registerProjectArtifactRoutes, registerProjectFileRoutes, registerProjectUploadRoutes } from './routes/project/index.js';
 import { registerVelaRoutes } from './routes/vela.js';
+import { registerDevServerRoutes } from './dev-server/routes.js';
+import { handleDevServerProxyUpgrade, registerDevServerProxyRoutes } from './dev-server/proxy.js';
+import { getDevServerRunner } from './dev-server/runner.js';
 import { registerFinalizeRoutes, registerImportRoutes, registerProjectExportRoutes } from './import-export-routes.js';
 import { registerHandoffRoutes } from './routes/handoff.js';
 import { EmptyTranscriptError, synthesizeHandoffPrompt } from './design/index.js';
@@ -2969,6 +2972,20 @@ export async function startServer({
     });
   });
   registerSocialShareRoutes(app, { http: httpDeps });
+  registerDevServerRoutes(app, {
+    db,
+    http: httpDeps,
+    paths: pathDeps,
+    projectStore: projectStoreDeps,
+    projectFiles: projectFileDeps,
+  });
+  registerDevServerProxyRoutes(app, {
+    db,
+    http: httpDeps,
+    paths: pathDeps,
+    projectStore: projectStoreDeps,
+    projectFiles: projectFileDeps,
+  });
   registerProjectRoutes(app, {
     db,
     design,
@@ -8621,6 +8638,7 @@ export async function startServer({
       composioConnectorProvider.stopCatalogRefreshLoop();
       orbitService.stop();
       routineService?.stop();
+      void getDevServerRunner().shutdown().catch(() => {});
     };
     const shutdownDaemonRuns = async () => {
       if (daemonShutdownStarted) return;
@@ -8633,6 +8651,10 @@ export async function startServer({
     let server;
     try {
       server = app.listen(port, host);
+      server.on('upgrade', (req, socket, head) => {
+        if (handleDevServerProxyUpgrade(req, socket, head)) return;
+        socket.destroy();
+      });
       server.once('listening', () => {
         // Widen the between-request idle window so kept-alive sockets
         // belonging to chat/SSE clients survive the gaps between bursts.

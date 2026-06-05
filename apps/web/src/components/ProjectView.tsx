@@ -307,7 +307,32 @@ type ProjectChatSendMeta = ChatSendMeta & {
    *  the home submit (with any soft warning answered there); skip re-gating
    *  so the user is never double-prompted for one task. */
   amrGatePrechecked?: boolean;
+  appPreviewContext?: AppPreviewPageContext | null;
 };
+
+export interface AppPreviewReactSource {
+  file?: string | null;
+  line?: number | null;
+  column?: number | null;
+}
+
+export interface AppPreviewReactComponentSummary {
+  name: string;
+  count?: number;
+  minDepth?: number;
+  source?: AppPreviewReactSource | null;
+}
+
+export interface AppPreviewReactStackItem {
+  name: string;
+  source?: AppPreviewReactSource | null;
+}
+
+export interface AppPreviewPageContext {
+  route: string;
+  title?: string;
+  components: AppPreviewReactComponentSummary[];
+}
 
 export function mergeSavedPreviewComment(current: PreviewComment[], saved: PreviewComment): PreviewComment[] {
   const existingIndex = current.findIndex((comment) => comment.id === saved.id);
@@ -1535,6 +1560,7 @@ export function ProjectView({
   const [liveArtifactEvents, setLiveArtifactEvents] = useState<LiveArtifactEventItem[]>([]);
   const [workspaceFocused, setWorkspaceFocused] = useState(false);
   const [commentInspectorActive, setCommentInspectorActive] = useState(false);
+  const [activeAppPreviewContext, setActiveAppPreviewContext] = useState<AppPreviewPageContext | null>(null);
   const commentInspectorPortalId = useId();
   const leftInspectorActive = commentInspectorActive;
   // Per-session override for the BYOK chat's generate_image tool. Seeded once
@@ -4778,6 +4804,21 @@ export function ProjectView({
     }
   }, [enqueueChatSend, project.id]);
 
+  const formatAppPreviewContextForAgent = useCallback((context: AppPreviewPageContext | null, projectFiles: ProjectFile[]): string => {
+    if (!context) return '';
+    const appComponents = context.components.filter((c: AppPreviewReactComponentSummary) => !['RouterProvider','RouterContextProvider','Matches','MatchesInner','Transitioner','CatchBoundary','CatchBoundaryImpl','MatchImpl','MatchView','SafeFragment','MatchInnerImpl','OutletImpl','Fragment','Provider'].includes(c.name));
+    const lines = ['', '', '<active-app-preview-context>', 'The user currently has the live App Preview tab active. Treat the request as scoped to this running React app page unless the user explicitly says otherwise. Prefer editing the owning React components/pages in the linked project, not generated HTML.', `route: ${context.route || '/'}`];
+    if (context.title) lines.push(`documentTitle: ${context.title}`);
+    if (appComponents.length > 0) { lines.push('visibleReactComponents:'); appComponents.slice(0,80).forEach((c: AppPreviewReactComponentSummary, i: number)=>{ const src=c.source?.file?` (${c.source.file}${c.source.line?':'+c.source.line:''})`:''; lines.push(`${i+1}. ${c.name}${src}${c.count&&c.count>1?' x'+c.count:''}`); }); } else { lines.push('visibleReactComponents: not detected yet') }
+    lines.push('</active-app-preview-context>'); return lines.join('\n');
+  }, []);
+
+  const historyWithAppPreviewContext = useCallback((history: ChatMessage[], userMessageId: string, context: AppPreviewPageContext | null, projectFiles: ProjectFile[]): ChatMessage[] => {
+    const rendered = formatAppPreviewContextForAgent(context, projectFiles);
+    if (!rendered) return history;
+    return history.map((m) => m.id === userMessageId && m.role === 'user' ? { ...m, content: `${m.content}${rendered}` } : m);
+  }, [formatAppPreviewContextForAgent]);
+
   const handleSend = useCallback(
     async (
       prompt: string,
@@ -5045,9 +5086,11 @@ export function ProjectView({
         );
       };
       activeCompletionNotificationRunsRef.current.add(assistantId);
-      const nextHistory = retryTarget
+      const turnAppPreviewContext = meta?.appPreviewContext ?? activeAppPreviewContext;
+      const baseHistory = retryTarget
         ? [...retryTarget.priorMessages, userMsg]
         : [...historyBase, userMsg];
+      const nextHistory = historyWithAppPreviewContext(baseHistory, userMsg.id, turnAppPreviewContext, projectFiles);
       const nextVisibleMessages = retryTarget
         ? [...nextHistory, ...retryTarget.preservedAttempts, assistantMsg]
         : [...nextHistory, assistantMsg];

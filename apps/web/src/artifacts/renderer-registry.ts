@@ -58,7 +58,11 @@ export const ReactComponentRenderer: ArtifactRenderer = {
   id: 'react-component',
   supportsStreaming: false,
   canRender: ({ file }) => {
-    const manifest = resolveManifest(file);
+    // Production React source files (.tsx/.jsx with imports, aliases, stories,
+    // router providers, etc.) are not standalone OD artifacts. Only use the
+    // React artifact runtime when the daemon supplied an explicit artifact
+    // manifest. Plain extension inference should fall through to TextViewer.
+    const manifest = file.artifactManifest;
     if (!manifest) return false;
     return manifest.kind === 'react-component' || manifest.renderer === 'react-component';
   },
