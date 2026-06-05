@@ -8843,6 +8843,7 @@ export function ProjectView({
           githubConnected={githubConnected}
           commentPortalId={commentInspectorPortalId}
           onCommentModeChange={setCommentInspectorActive}
+          onAppPreviewContextChange={setActiveAppPreviewContext}
           chatConfig={config}
           chatAgentsById={agentsById}
           chatLocale={locale}

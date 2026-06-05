@@ -30,9 +30,11 @@ import { isMacPlatform } from '../utils/platform';
 import {
   deleteProjectFile,
   fetchProjectFileText,
+  fetchProjectDevServerStatus,
   fetchProjectFolders,
   fetchPluginExampleHtml,
   fetchPluginPreviewHtml,
+  projectDevServerAppProxyUrl,
   projectFileUrl,
   projectRawUrl,
   applyLibraryAsset,
@@ -61,6 +63,7 @@ import {
   replaceDesignMdColorAtIndex,
   updateBrandColor,
 } from '../runtime/kit-edit';
+import { buildBoardCommentAttachments } from '../comments';
 import { latestTodosFromEvents, type TodoItem } from '../runtime/todos';
 import { deliverableSlideNavForActiveFile, isSlideNavDeliverableNow } from '../runtime/slide-nav';
 import { buildSrcdoc } from '../runtime/srcdoc';
@@ -106,6 +109,7 @@ import {
 } from '@open-design/contracts';
 import { createTerminal, killTerminal, listPlugins } from '../state/projects';
 import { DesignFilesPanel, type DesignFilesNavState } from './DesignFilesPanel';
+import { DevServerControls } from './DevServerControls';
 import {
   DesignBrowserPanel,
   labelFromUrl,
@@ -247,6 +251,7 @@ interface Props {
   githubConnected?: boolean;
   commentPortalId?: string;
   onCommentModeChange?: (active: boolean) => void;
+  onAppPreviewContextChange?: (context: AppPreviewPageContext | null) => void;
   // Side Chat (`chat:<conversationId>` tab) wiring. Threaded from ProjectView
   // so a secondary ChatPane can render an already-open conversation tab without
   // FileWorkspace owning any chat state. All optional: a workspace mounted
@@ -1240,6 +1245,7 @@ export function FileWorkspace({
   githubConnected,
   commentPortalId,
   onCommentModeChange,
+  onAppPreviewContextChange,
   chatConfig,
   chatAgentsById,
   chatLocale,
@@ -1362,6 +1368,13 @@ export function FileWorkspace({
   const pagesMenuButtonRef = useRef<HTMLButtonElement | null>(null);
   const pagesMenuFloatingRef = useRef<HTMLDivElement | null>(null);
   const tabsBarRef = useRef<HTMLDivElement | null>(null);
+  const [appPreviewOpen, setAppPreviewOpen] = useState(false);
+  const [appPreviewReloadKey, setAppPreviewReloadKey] = useState(0);
+  const [devServerRunning, setDevServerRunning] = useState(false);
+  const handleDevServerRunningChange = useCallback((running: boolean) => {
+    setDevServerRunning(running);
+    if (running) setAppPreviewOpen(true);
+  }, []);
   const draggedTabNameRef = useRef<string | null>(null);
   const browserTabSequenceRef = useRef(0);
   const openFileRef = useRef<(name: string) => void>(() => {});
@@ -1602,6 +1615,26 @@ export function FileWorkspace({
   }, [loadSketchFile, sketchFiles]);
 
   useEffect(() => {
+    let cancelled = false;
+    async function loadDevServerStatus() {
+      try {
+        const status = await fetchProjectDevServerStatus(projectId);
+        if (cancelled) return;
+        const running = status.status === 'running';
+        setDevServerRunning(running);
+        if (running) setAppPreviewOpen(true);
+      } catch { if (!cancelled) setDevServerRunning(false); }
+    }
+    void loadDevServerStatus();
+    const interval = window.setInterval(() => void loadDevServerStatus(), 5000);
+    return () => { cancelled = true; window.clearInterval(interval); };
+  }, [projectId]);
+
+  useEffect(() => {
+    if (activeTab !== APP_PREVIEW_TAB) onAppPreviewContextChange?.(null);
+  }, [activeTab, onAppPreviewContextChange]);
+
+  useEffect(() => {
     const nextBrowserTabs = browserTabsFromState(tabsState.browserTabs);
     setBrowserTabs(nextBrowserTabs);
     browserTabSequenceRef.current = maxBrowserTabSequence(nextBrowserTabs);
@@ -1796,6 +1829,8 @@ export function FileWorkspace({
     if (
       activeTab === DESIGN_FILES_TAB
       || activeTab === DESIGN_SYSTEM_TAB
+      || activeTab === QUESTIONS_TAB
+      || activeTab === APP_PREVIEW_TAB
     ) return;
     if (isBrowserTabId(activeTab)) {
       if (!browserTabs.some((tab) => tab.id === activeTab)) {
@@ -1989,6 +2024,13 @@ export function FileWorkspace({
     });
   }, [t]);
 
+  function openAppPreview() {
+    setUploadError(null);
+    setAppPreviewOpen(true);
+    setActiveTab(APP_PREVIEW_TAB);
+    setAppPreviewReloadKey((k) => k + 1);
+  }
+
   function focusWorkspaceTab(tabId: string) {
     setUploadError(null);
     if (tabId === DESIGN_SYSTEM_TAB) {
@@ -2040,6 +2082,11 @@ export function FileWorkspace({
   function closeActiveWorkspaceTab() {
     if (!workspaceTabIds.includes(activeTab)) return;
     if (activeTab === DESIGN_FILES_TAB || activeTab === DESIGN_SYSTEM_TAB) return;
+    if (activeTab === APP_PREVIEW_TAB && devServerRunning) return;
+    if (activeTab === QUESTIONS_TAB) {
+      setActiveTab(defaultRootTab);
+      return;
+    }
     if (isBrowserTabId(activeTab)) {
       closeBrowserTab(activeTab);
       return;
@@ -2064,6 +2111,12 @@ export function FileWorkspace({
   }
 
   function closeTab(name: string) {
+    if (name === APP_PREVIEW_TAB) {
+      if (devServerRunning) { setAppPreviewOpen(true); return; }
+      setAppPreviewOpen(false);
+      setActiveTab(tabsState.active ?? DESIGN_FILES_TAB);
+      return;
+    }
     // Terminal tabs own a daemon PTY that now outlives unmount (so tab switches
     // reattach cheaply). An explicit Close is the one place we terminate it —
     // kill the LIVE session (which may differ from the tab's original id after
@@ -2237,7 +2290,7 @@ export function FileWorkspace({
   // The Pages switcher is already sticky-pinned, so we only scroll
   // for real workspace tabs. Issue #775.
   useEffect(() => {
-    if (activeTab === DESIGN_FILES_TAB || activeTab === DESIGN_SYSTEM_TAB) return;
+    if (activeTab === DESIGN_FILES_TAB || activeTab === DESIGN_SYSTEM_TAB || activeTab === QUESTIONS_TAB || activeTab === APP_PREVIEW_TAB) return;
     const tabBar = tabsBarRef.current;
     if (!tabBar) return;
     const el = tabBar.querySelector<HTMLElement>('.ws-tab.active');
@@ -2820,6 +2873,7 @@ export function FileWorkspace({
       activeTab === DESIGN_FILES_TAB
       || activeTab === DESIGN_SYSTEM_TAB
       || isBrowserTabId(activeTab)
+      || activeTab === APP_PREVIEW_TAB
     ) return null;
     const onDisk = visibleFiles.find((f) => f.name === activeTab);
     if (onDisk) return onDisk;
@@ -2843,6 +2897,7 @@ export function FileWorkspace({
       activeTab === DESIGN_FILES_TAB
       || activeTab === DESIGN_SYSTEM_TAB
       || isBrowserTabId(activeTab)
+      || activeTab === APP_PREVIEW_TAB
     ) return null;
     return liveArtifactEntries.find((entry) => entry.tabId === activeTab) ?? null;
   }, [activeTab, liveArtifactEntries]);
@@ -3447,6 +3502,50 @@ export function FileWorkspace({
               <Icon name="chevron-down" size={12} />
             </button>
           </div>
+          {appPreviewOpen ? (
+            <button
+              type="button"
+              className={`ws-tab app-preview-tab ${activeTab === APP_PREVIEW_TAB ? 'active' : ''}`}
+              role="tab"
+              aria-selected={activeTab === APP_PREVIEW_TAB}
+              tabIndex={0}
+              data-testid="app-preview-tab"
+              onClick={() => setActiveTab(APP_PREVIEW_TAB)}
+              title="App Preview"
+            >
+              <span className="tab-icon" aria-hidden>
+                <Icon name="external-link" size={13} />
+              </span>
+              <span className="ws-tab-label">App Preview</span>
+              {!devServerRunning ? (
+                <button
+                  type="button"
+                  className="ws-tab-close"
+                  onClick={(e) => { e.stopPropagation(); closeTab(APP_PREVIEW_TAB); }}
+                  title={t('workspace.closeTab')}
+                >
+                  <Icon name="close" size={11} />
+                </button>
+              ) : null}
+            </button>
+          ) : null}
+          {showQuestionsTab ? (
+            <button
+              type="button"
+              className={`ws-tab questions-tab ${activeTab === QUESTIONS_TAB ? 'active' : ''}`}
+              role="tab"
+              aria-selected={activeTab === QUESTIONS_TAB}
+              tabIndex={0}
+              data-testid="questions-tab"
+              onClick={() => setActiveTab(QUESTIONS_TAB)}
+              title={t('questions.tabLabel')}
+            >
+              <span className="tab-icon" aria-hidden>
+                <Icon name="help-circle" size={13} />
+              </span>
+              <span className="ws-tab-label">{t('questions.tabLabel')}</span>
+            </button>
+          ) : null}
           {visibleOrderedWorkspaceTabs.map((entry) => {
             if (entry.kind === 'browser') {
               const browserTab = entry.browserTab;
@@ -3547,6 +3646,11 @@ export function FileWorkspace({
         {/* Pinned to the right for project/file actions; the tab launcher sits
             next to the file tabs so its spatial relationship stays clear. */}
         <div className="ws-tabs-actions">
+          <button type="button" className="viewer-action" onClick={openAppPreview}>
+            <Icon name="external-link" size={13} />
+            <span>App Preview</span>
+          </button>
+          <DevServerControls projectId={projectId} onRunningChange={handleDevServerRunningChange} />
           <div
             id={APP_CHROME_FILE_ACTIONS_ID}
             className="ws-tabs-file-actions"
@@ -3654,7 +3758,29 @@ export function FileWorkspace({
             />
           </div>
         ))}
-        {activeTab === DESIGN_SYSTEM_TAB && designSystemProject ? (
+        {activeTab === APP_PREVIEW_TAB ? (
+          <AppPreviewTab
+            projectId={projectId}
+            reloadKey={appPreviewReloadKey}
+            streaming={streaming}
+            commentQueueOnSend={commentQueueOnSend}
+            commentSendDisabled={commentSendDisabled}
+            onSendBoardCommentAttachments={onSendBoardCommentAttachments}
+            onCommentModeChange={onCommentModeChange}
+            onAppPreviewContextChange={onAppPreviewContextChange}
+          />
+        ) : activeTab === QUESTIONS_TAB ? (
+          <QuestionsPanel
+            key={questionFormKey ?? undefined}
+            formKey={questionFormKey}
+            form={questionForm ?? questionFormPreview}
+            interactive={questionFormInteractive}
+            submitDisabled={questionFormSubmitDisabled}
+            submittedAnswers={questionFormSubmittedAnswers}
+            generating={questionsGenerating}
+            onSubmit={(text) => onSubmitQuestionForm?.(text)}
+          />
+        ) : activeTab === DESIGN_SYSTEM_TAB && designSystemProject ? (
           <DesignSystemProjectPanel
             projectId={projectId}
             system={designSystemProject}
@@ -7911,4 +8037,177 @@ function isLiveArtifactImplementationPath(name: string): boolean {
   // particular, keep implementation-only snapshot and tile files hidden even
   // if a generic project-files endpoint returns them in older daemon builds.
   return true;
+}
+
+// --- App Preview tab support ------------------------------------------
+
+const APP_PREVIEW_TAB = '__app_preview__';
+const APP_PREVIEW_COMMENT_FILE_PATH = 'App Preview (live React app)';
+
+type AppPreviewTarget = {
+  elementId: string;
+  selector: string;
+  tagName?: string;
+  text?: string;
+  label?: string;
+  htmlHint?: string;
+  position: { x: number; y: number; width: number; height: number };
+  style?: Record<string, string>;
+  react?: {
+    route?: string;
+    title?: string;
+    componentStack?: { name: string; source?: { file?: string | null; line?: number | null; column?: number | null } | null }[];
+    pageComponents?: { name: string; count?: number; minDepth?: number; source?: { file?: string | null; line?: number | null; column?: number | null } | null }[];
+  };
+};
+
+export interface AppPreviewPageContext {
+  route: string;
+  title?: string;
+  components: { name: string; count?: number; minDepth?: number; source?: { file?: string | null; line?: number | null; column?: number | null } | null }[];
+}
+
+function AppPreviewTab({
+  projectId,
+  reloadKey,
+  streaming,
+  commentQueueOnSend,
+  commentSendDisabled,
+  onSendBoardCommentAttachments,
+  onCommentModeChange,
+  onAppPreviewContextChange,
+}: {
+  projectId: string;
+  reloadKey: number;
+  streaming?: boolean;
+  commentQueueOnSend?: boolean;
+  commentSendDisabled?: boolean;
+  onSendBoardCommentAttachments?: (attachments: ChatCommentAttachment[]) => Promise<boolean | void> | boolean | void;
+  onCommentModeChange?: (active: boolean) => void;
+  onAppPreviewContextChange?: (context: AppPreviewPageContext | null) => void;
+}) {
+  const [localReloadKey, setLocalReloadKey] = useState(0);
+  const [inspectMode, setInspectMode] = useState(false);
+  const [commentMode, setCommentMode] = useState(false);
+  const [drawMode, setDrawMode] = useState(false);
+  const [selectedTarget, setSelectedTarget] = useState<AppPreviewTarget | null>(null);
+  const [inspectDraft, setInspectDraft] = useState<Record<string, string>>({});
+  const [commentDraft, setCommentDraft] = useState('');
+  const [pageContext, setPageContext] = useState<AppPreviewPageContext | null>(null);
+  const [sendingComment, setSendingComment] = useState(false);
+  const [commentError, setCommentError] = useState<string | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const src = `${projectDevServerAppProxyUrl(projectId)}?odReload=${reloadKey}-${localReloadKey}`;
+
+  const postPreviewMode = useCallback((payload: Record<string, unknown>) => {
+    iframeRef.current?.contentWindow?.postMessage(payload, '*');
+  }, []);
+
+  const syncPreviewModes = useCallback(() => {
+    postPreviewMode({ type: 'od:inspect-mode', enabled: inspectMode });
+    postPreviewMode({ type: 'od:comment-mode', enabled: commentMode, mode: 'inspect' });
+  }, [commentMode, inspectMode, postPreviewMode]);
+
+  useEffect(() => { syncPreviewModes(); }, [syncPreviewModes, localReloadKey, reloadKey]);
+  useEffect(() => { onCommentModeChange?.(commentMode || drawMode); }, [commentMode, drawMode, onCommentModeChange]);
+
+  useEffect(() => {
+    function targetFromData(data: {
+      elementId?: string; selector?: string; tagName?: string; text?: string; label?: string; htmlHint?: string;
+      position?: Partial<AppPreviewTarget['position']>; style?: Record<string, string>; react?: AppPreviewTarget['react'];
+    }): AppPreviewTarget | null {
+      if (!data.elementId || !data.selector) return null;
+      return { elementId: data.elementId, selector: data.selector, tagName: data.tagName, text: data.text, label: data.label, htmlHint: data.htmlHint, position: { x: Number(data.position?.x ?? 0), y: Number(data.position?.y ?? 0), width: Number(data.position?.width ?? 0), height: Number(data.position?.height ?? 0) }, style: data.style, react: data.react };
+    }
+    function onMessage(event: MessageEvent) {
+      if (event.source !== iframeRef.current?.contentWindow) return;
+      const data = event.data as ({ type?: string; context?: AppPreviewPageContext } & Parameters<typeof targetFromData>[0]) | null;
+      if (!data) return;
+      if (data.type === 'od:react-page-context') { const ctx = data.context ?? null; setPageContext(ctx); onAppPreviewContextChange?.(ctx); return; }
+      if (data.type !== 'od:inspect-target' && data.type !== 'od:comment-target') return;
+      const target = targetFromData(data);
+      if (!target) return;
+      setSelectedTarget(target);
+      setInspectDraft({ color: target.style?.color ?? '', backgroundColor: target.style?.backgroundColor ?? '', fontSize: target.style?.fontSize ?? '', fontWeight: target.style?.fontWeight ?? '', borderRadius: target.style?.borderRadius ?? '', padding: target.style?.padding ?? '' });
+      if (data.type === 'od:comment-target') setCommentMode(true);
+    }
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [onAppPreviewContextChange]);
+
+  function sendAppComment(action: 'queue' | 'send') {
+    if (!selectedTarget || !commentDraft.trim() || !onSendBoardCommentAttachments || sendingComment) return;
+    if (action === 'send' && commentSendDisabled) return;
+    setSendingComment(true); setCommentError(null);
+    try {
+      const target: PreviewCommentTarget = { filePath: APP_PREVIEW_COMMENT_FILE_PATH, elementId: selectedTarget.elementId, selector: selectedTarget.selector, label: selectedTarget.label || selectedTarget.tagName || selectedTarget.elementId, text: selectedTarget.text || '', position: selectedTarget.position, htmlHint: selectedTarget.htmlHint || '', selectionKind: 'element' };
+      const attachments: ChatCommentAttachment[] = [{ id: `${target.elementId}-board-1`, order: 1, filePath: target.filePath, elementId: target.elementId, selector: target.selector, label: target.label, comment: commentDraft.trim(), currentText: (target.text || '').slice(0, 160), pagePosition: target.position, htmlHint: target.htmlHint, selectionKind: 'element', source: 'board-batch' }];
+      const result = onSendBoardCommentAttachments(attachments);
+      const finish = () => { setCommentDraft(''); setSelectedTarget(null); if (!commentQueueOnSend || action === 'send') setCommentMode(false); };
+      if (result instanceof Promise) { result.then(() => finish()).catch(() => {}); } else { finish(); }
+    } catch (err) { setCommentError(err instanceof Error ? err.message : 'Could not send comment.'); } finally { setSendingComment(false); }
+  }
+
+  function applyInspectDraft(prop: string, value: string) {
+    if (!selectedTarget) return;
+    setInspectDraft((c) => ({ ...c, [prop]: value }));
+    postPreviewMode({ type: 'od:inspect-set', elementId: selectedTarget.elementId, selector: selectedTarget.selector, prop, value });
+  }
+
+  function resetInspectDraft() {
+    if (!selectedTarget) return;
+    postPreviewMode({ type: 'od:inspect-reset', elementId: selectedTarget.elementId, selector: selectedTarget.selector });
+    setInspectDraft({ color: selectedTarget.style?.color ?? '', backgroundColor: selectedTarget.style?.backgroundColor ?? '', fontSize: selectedTarget.style?.fontSize ?? '', fontWeight: selectedTarget.style?.fontWeight ?? '', borderRadius: selectedTarget.style?.borderRadius ?? '', padding: selectedTarget.style?.padding ?? '' });
+  }
+
+  return (
+    <div className="viewer app-preview-tab production-react-viewer">
+      <div className="viewer-toolbar">
+        <div className="viewer-toolbar-left production-react-viewer-title">
+          <span>App Preview</span>
+          <code>{src}</code>
+          <span className="production-react-story-chip">{pageContext?.route || 'App canvas'}</span>
+          {pageContext?.components.length ? (<span className="production-react-story-chip">{pageContext.components.length} React components</span>) : null}
+        </div>
+        <div className="viewer-toolbar-actions">
+          <button type="button" className={`viewer-action${inspectMode ? ' active' : ''}`} aria-pressed={inspectMode} onClick={() => { setInspectMode((v) => !v); setCommentMode(false); setDrawMode(false); setSelectedTarget(null); }}>Inspect</button>
+          <button type="button" className={`viewer-action${commentMode ? ' active' : ''}`} aria-pressed={commentMode} onClick={() => { setCommentMode((v) => !v); setInspectMode(false); setDrawMode(false); setSelectedTarget(null); }}>Comment</button>
+          <button type="button" className={`viewer-action${drawMode ? ' active' : ''}`} aria-pressed={drawMode} onClick={() => { setDrawMode((v) => !v); setCommentMode(false); setInspectMode(false); setSelectedTarget(null); }}>
+            <Icon name="pencil" size={13} /><span>Draw</span>
+          </button>
+          <button type="button" className="viewer-action" onClick={() => setLocalReloadKey((k) => k + 1)}>
+            <Icon name="reload" size={13} /><span>Reload</span>
+          </button>
+        </div>
+      </div>
+      <div className="production-react-preview-body">
+        <iframe ref={iframeRef} key={`${reloadKey}-${localReloadKey}`} className="production-react-preview-frame" data-od-active="true" data-od-render-mode="url-load" title="App Preview" src={src} sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads" onLoad={() => syncPreviewModes()} />
+        {selectedTarget ? (
+          <div className="production-react-inspect-card">
+            <div><strong>{commentMode ? 'Comment target' : selectedTarget.tagName || 'element'}</strong><code>{selectedTarget.elementId}</code></div>
+            {selectedTarget.text ? <p>{selectedTarget.text}</p> : null}
+            {commentMode ? (
+              <div className="production-react-comment-form">
+                <textarea value={commentDraft} onChange={(e) => setCommentDraft(e.target.value)} placeholder="Add a note for this element" disabled={sendingComment} />
+                {commentError ? <p className="production-react-comment-error">{commentError}</p> : null}
+                <div>
+                  <button type="button" className="viewer-action" disabled={sendingComment || !commentDraft.trim() || !onSendBoardCommentAttachments} onClick={() => sendAppComment('queue')}>{sendingComment ? 'Sending…' : 'Queue'}</button>
+                  <button type="button" className="viewer-action primary" disabled={sendingComment || !commentDraft.trim() || !onSendBoardCommentAttachments || Boolean(commentSendDisabled)} onClick={() => sendAppComment('send')}>{sendingComment ? 'Sending…' : 'Send'}</button>
+                </div>
+              </div>
+            ) : null}
+            {inspectMode ? (
+              <div className="production-react-style-grid">
+                {([{ prop: 'color', label: 'Text' }, { prop: 'backgroundColor', label: 'Background' }, { prop: 'fontSize', label: 'Font size' }, { prop: 'fontWeight', label: 'Weight' }, { prop: 'borderRadius', label: 'Radius' }, { prop: 'padding', label: 'Padding' }] as const).map(({ prop, label }) => (
+                  <label key={prop}><span>{label}</span><input value={inspectDraft[prop] ?? ''} placeholder={prop === 'fontSize' ? '24px' : prop === 'fontWeight' ? '700' : undefined} onChange={(e) => applyInspectDraft(prop, e.target.value)} /></label>
+                ))}
+                <button type="button" className="viewer-action" onClick={resetInspectDraft}>Reset styles</button>
+              </div>
+            ) : null}
+            <button type="button" className="viewer-action" onClick={() => setSelectedTarget(null)}>Clear</button>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
 }
