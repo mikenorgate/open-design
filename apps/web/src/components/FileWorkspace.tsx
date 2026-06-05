@@ -110,6 +110,7 @@ import {
 import { createTerminal, killTerminal, listPlugins } from '../state/projects';
 import { DesignFilesPanel, type DesignFilesNavState } from './DesignFilesPanel';
 import { DevServerControls } from './DevServerControls';
+import { PreviewDrawOverlay } from './PreviewDrawOverlay';
 import {
   DesignBrowserPanel,
   labelFromUrl,
@@ -8195,7 +8196,16 @@ function AppPreviewTab({
         </div>
       </div>
       <div className="production-react-preview-body">
-        <iframe ref={iframeRef} key={`${reloadKey}-${localReloadKey}`} className="production-react-preview-frame" data-od-active="true" data-od-render-mode="url-load" title="App Preview" src={src} sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads" onLoad={() => syncPreviewModes()} />
+        <PreviewDrawOverlay
+          active={drawMode}
+          onActiveChange={setDrawMode}
+          captureTarget={null}
+          filePath={APP_PREVIEW_COMMENT_FILE_PATH}
+          sendDisabled={Boolean(streaming || commentSendDisabled)}
+          sendDisabledReason="A task is currently running"
+        >
+          <iframe ref={iframeRef} key={`${reloadKey}-${localReloadKey}`} className="production-react-preview-frame" data-od-active="true" data-od-render-mode="url-load" title="App Preview" src={src} sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads" onLoad={() => syncPreviewModes()} />
+        </PreviewDrawOverlay>
         {selectedTarget ? (
           <div className="production-react-inspect-card">
             <div><strong>{commentMode ? 'Comment target' : selectedTarget.tagName || 'element'}</strong><code>{selectedTarget.elementId}</code></div>
