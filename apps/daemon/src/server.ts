@@ -460,6 +460,9 @@ import { registerDesignSystemToolRoutes } from './routes/design-system-tool.js';
 import { registerDeployRoutes, registerDeploymentCheckRoutes } from './routes/deploy.js';
 import { registerMediaRoutes } from './media-routes.js';
 import { registerProjectRoutes, registerProjectArtifactRoutes, registerProjectFileRoutes, registerProjectUploadRoutes } from './project-routes.js';
+import { registerDevServerRoutes } from './dev-server/routes.js';
+import { handleDevServerProxyUpgrade, registerDevServerProxyRoutes } from './dev-server/proxy.js';
+import { getDevServerRunner } from './dev-server/runner.js';
 import { registerFinalizeRoutes, registerImportRoutes, registerProjectExportRoutes } from './import-export-routes.js';
 import { registerHandoffRoutes } from './routes/handoff.js';
 import { EmptyTranscriptError, synthesizeHandoffPrompt } from './handoff-design.js';
@@ -5917,6 +5920,20 @@ export async function startServer({
     projectFiles: projectFileDeps,
   });
   registerSocialShareRoutes(app, { http: httpDeps });
+  registerDevServerRoutes(app, {
+    db,
+    http: httpDeps,
+    paths: pathDeps,
+    projectStore: projectStoreDeps,
+    projectFiles: projectFileDeps,
+  });
+  registerDevServerProxyRoutes(app, {
+    db,
+    http: httpDeps,
+    paths: pathDeps,
+    projectStore: projectStoreDeps,
+    projectFiles: projectFileDeps,
+  });
   registerProjectRoutes(app, {
     db,
     design,
@@ -14841,6 +14858,7 @@ export async function startServer({
       composioConnectorProvider.stopCatalogRefreshLoop();
       orbitService.stop();
       routineService?.stop();
+      void getDevServerRunner().shutdown().catch(() => {});
     };
     const shutdownDaemonRuns = async () => {
       if (daemonShutdownStarted) return;
@@ -14853,6 +14871,10 @@ export async function startServer({
     let server;
     try {
       server = app.listen(port, host);
+      server.on('upgrade', (req, socket, head) => {
+        if (handleDevServerProxyUpgrade(req, socket, head)) return;
+        socket.destroy();
+      });
       server.once('listening', () => {
         // Widen the between-request idle window so kept-alive sockets
         // belonging to chat/SSE clients survive the gaps between bursts.

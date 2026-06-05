@@ -182,6 +182,7 @@ const PROJECT_STRING_FLAGS = new Set([
   'prompt-file', 'path', 'dir', 'as',
   'agent', 'model', 'snapshot-id', 'inputs', 'grant-caps', 'editor',
   'title', 'against', 'seed-from', 'fork-after', 'mode',
+  'title', 'against', 'port',
 ]);
 const PROJECT_BOOLEAN_FLAGS = new Set(['help', 'h', 'json', 'follow']);
 // `od templates …` mirrors NewProjectPanel / ExamplesTab. Same surface,
@@ -274,6 +275,7 @@ const SUBCOMMAND_MAP = {
   atoms: runAtoms,
   skills: runSkills,
   'design-systems': runDesignSystems,
+  'component-sync': runComponentSync,
   craft: runCraft,
   diagnostics: runDiagnostics,
   status: runStatus,
@@ -4729,6 +4731,150 @@ function normalizeChatSessionModeFlag(value) {
   process.exit(2);
 }
 
+async function runDevServer(rest, flags) {
+  const id = rest.find((a) => !a.startsWith('-'));
+  if (!id) {
+    console.error('Usage: od project dev-server <id> <start|status|stop|restart> [--port <n>]');
+    process.exit(2);
+  }
+  const action = rest[rest.indexOf(id) + 1];
+  if (!['start', 'status', 'stop', 'restart'].includes(action)) {
+    console.error(`Unknown dev-server action: ${action ?? '(missing)'}`);
+    console.error('Usage: od project dev-server <id> <start|status|stop|restart>');
+    process.exit(2);
+  }
+
+  const base = (await cliDaemonUrl(flags)).replace(/\/$/, '');
+  const projectId = encodeURIComponent(id);
+
+  if (action === 'status') {
+    const resp = await fetch(`${base}/api/projects/${projectId}/dev-server/status`);
+    if (!resp.ok) return structuredHttpFailure(resp);
+    const data = await resp.json();
+    if (flags.json) return process.stdout.write(JSON.stringify(data, null, 2) + '\n');
+    console.log(`Status:    ${data.status}`);
+    if (data.url) console.log(`URL:       ${data.url}`);
+    if (data.port != null) console.log(`Port:      ${data.port}`);
+    if (data.framework) console.log(`Framework: ${data.framework}`);
+    if (data.uptimeMs != null) console.log(`Uptime:    ${(data.uptimeMs / 1000).toFixed(0)}s`);
+    if (data.lastError) console.log(`Error:     ${data.lastError}`);
+    return;
+  }
+
+  if (action === 'stop') {
+    const resp = await fetch(`${base}/api/projects/${projectId}/dev-server/stop`, { method: 'POST' });
+    if (!resp.ok) return structuredHttpFailure(resp);
+    const data = await resp.json();
+    if (flags.json) return process.stdout.write(JSON.stringify(data, null, 2) + '\n');
+    console.log(`[dev-server] stopped for project ${id}`);
+    return;
+  }
+
+  if (action === 'start' || action === 'restart') {
+    const body = {};
+    if (typeof flags.port === 'string') {
+      const parsedPort = Number(flags.port);
+      if (!Number.isInteger(parsedPort) || parsedPort <= 0 || parsedPort > 65535) {
+        console.error('--port must be an integer between 1 and 65535');
+        process.exit(2);
+      }
+      body.port = parsedPort;
+    }
+    const urlPath = action === 'restart' ? 'restart' : 'start';
+    const resp = await fetch(
+      `${base}/api/projects/${projectId}/dev-server/${urlPath}`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    );
+    if (!resp.ok) return structuredHttpFailure(resp);
+    const data = await resp.json();
+    if (flags.json) return process.stdout.write(JSON.stringify(data, null, 2) + '\n');
+    console.log(`[dev-server] ${data.status} — ${data.url} (${data.framework}, ${data.packageManager})`);
+    return;
+  }
+}
+
+async function runComponentSync(args) {
+  const flags = parseFlags(args, { string: new Set(['daemon-url', 'project', 'component', 'artifact']), boolean: new Set(['json', 'help', 'h']) });
+  const rest = args.filter((a) => !a.startsWith('-'));
+  const action = rest[0];
+
+  if (!action || action === 'help' || flags.help || flags.h) {
+    console.log('Usage:');
+    console.log('  od component-sync status <projectId> [--json]');
+    console.log('  od component-sync link <projectId> --component <path> --artifact <dir>');
+    console.log('  od component-sync mark-synced <projectId> --component <path>');
+    console.log('  od component-sync unlink <projectId> --component <path>');
+    process.exit(action ? 0 : 2);
+  }
+
+  const projectId = rest[1];
+  if (!projectId) { console.error('Usage: od component-sync <action> <projectId> [...]'); process.exit(2); }
+
+  const base = (await cliDaemonUrl(flags)).replace(/\/$/, '');
+  const pid = encodeURIComponent(projectId);
+
+  if (action === 'status') {
+    const resp = await fetch(`${base}/api/projects/${pid}/component-sync/status`);
+    if (!resp.ok) return structuredHttpFailure(resp);
+    const data = await resp.json();
+    if (flags.json) return process.stdout.write(JSON.stringify(data, null, 2) + '\n');
+    console.log(`Linked: ${data.summary?.linked ?? 0}  Synced: ${data.summary?.synced ?? 0}  Unsynced: ${data.summary?.unsynced ?? 0}`);
+    for (const m of data.mappings || []) {
+      const icon = m.status === 'synced' ? '\u2714' : m.status === 'unsynced' ? '\u26a0' : '\u2014';
+      console.log(`  ${icon} ${m.componentPath} \u2192 ${m.artifactDir}`);
+    }
+    return;
+  }
+
+  const componentPath = typeof flags.component === 'string' ? flags.component : '';
+  if (!componentPath) { console.error('--component <path> is required'); process.exit(2); }
+
+  if (action === 'link') {
+    const artifactDir = typeof flags.artifact === 'string' ? flags.artifact : '';
+    if (!artifactDir) { console.error('--artifact <dir> is required'); process.exit(2); }
+    const resp = await fetch(`${base}/api/projects/${pid}/component-sync/link`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ componentPath, artifactDir }),
+    });
+    if (!resp.ok) return structuredHttpFailure(resp);
+    const data = await resp.json();
+    if (flags.json) return process.stdout.write(JSON.stringify(data, null, 2) + '\n');
+    console.log(`[component-sync] linked ${componentPath} \u2192 ${artifactDir}`);
+    return;
+  }
+
+  if (action === 'mark-synced') {
+    const resp = await fetch(`${base}/api/projects/${pid}/component-sync/sync`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ componentPath }),
+    });
+    if (!resp.ok) return structuredHttpFailure(resp);
+    const data = await resp.json();
+    if (flags.json) return process.stdout.write(JSON.stringify(data, null, 2) + '\n');
+    console.log(`[component-sync] marked ${componentPath} as synced`);
+    return;
+  }
+
+  if (action === 'unlink') {
+    const resp = await fetch(`${base}/api/projects/${pid}/component-sync/unlink`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ componentPath }),
+    });
+    if (!resp.ok) return structuredHttpFailure(resp);
+    const data = await resp.json();
+    if (flags.json) return process.stdout.write(JSON.stringify(data, null, 2) + '\n');
+    console.log(`[component-sync] unlinked ${componentPath}`);
+    return;
+  }
+
+  console.error(`Unknown action: ${action}`);
+  process.exit(2);
+}
+
 function safeReadJsonFile(p) {
   try {
     const fs = (require ? require('node:fs') : null);
@@ -4844,6 +4990,17 @@ async function runProject(args) {
   od project handoff <id> --conversation <id> --api-key <key> --model <model>
                     [--base-url <url>] [--max-tokens <n>]
                     Synthesize a resume-conversation handoff prompt.
+  od project dev-server <id> <start|status|stop|restart> [--port <n>]
+                    Manage a dev server (Vite / Next.js) for a
+                    folder-imported project.
+  od component-sync status <projectId> [--json]
+                    Show prototype-to-component sync status.
+  od component-sync link <projectId> --component <path> --artifact <dir>
+                    Link a React component to an OD artifact.
+  od component-sync mark-synced <projectId> --component <path>
+                    Mark a component as synced with its artifact.
+  od component-sync unlink <projectId> --component <path>
+                    Remove a component-artifact link.
 
 Common options:
   --daemon-url <url>   Open Design daemon HTTP base.
@@ -5000,6 +5157,10 @@ Common options:
       const resp = await fetch(`${base}/api/projects/${encodeURIComponent(id)}`, { method: 'DELETE' });
       if (!resp.ok) return structuredHttpFailure(resp, 'project-not-found');
       console.log(`[project] deleted ${id}`);
+      return;
+    }
+    case 'dev-server': {
+      await runDevServer(rest, flags);
       return;
     }
     case 'editors': {

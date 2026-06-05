@@ -191,23 +191,24 @@ describe('project-watchers (real chokidar)', () => {
     }
   }, 8_000);
 
-  it('ignores files inside .od/ and node_modules/', async () => {
+  it('ignores files inside generated dependency and agent-runtime dirs', async () => {
     const { root, projectId } = await makeProjectsRoot();
     const events: ProjectWatchEvent[] = [];
     const sub = subscribe(root, projectId, (e) => events.push(e), FAST_WATCH_OPTIONS);
     await sub.ready;
 
+    const ignoredDirs = ['.od', '.gsd', '.bg-shell', 'node_modules'];
     try {
-      await mkdir(path.join(root, projectId, '.od'), { recursive: true });
-      await writeFile(path.join(root, projectId, '.od', 'state.json'), '{}');
-      await mkdir(path.join(root, projectId, 'node_modules'), { recursive: true });
-      await writeFile(path.join(root, projectId, 'node_modules', 'x.js'), '');
+      for (const dir of ignoredDirs) {
+        await mkdir(path.join(root, projectId, dir), { recursive: true });
+        await writeFile(path.join(root, projectId, dir, 'state.json'), '{}');
+      }
 
       await writeFile(path.join(root, projectId, 'real.txt'), 'real');
       await waitFor(() => events.some((e) => e.path === 'real.txt'));
 
-      const ignored = events.filter(
-        (e) => e.path.startsWith('.od/') || e.path.startsWith('node_modules/'),
+      const ignored = events.filter((e) =>
+        ignoredDirs.some((dir) => e.path.startsWith(`${dir}/`)),
       );
       expect(ignored).toEqual([]);
     } finally {

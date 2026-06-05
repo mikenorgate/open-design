@@ -554,7 +554,7 @@ Plugin registry endpoint: `GET /api/plugins`. Directory overview → [`plugins/R
 | Desktop | Electron shell + sandboxed renderer + sidecar IPC (STATUS · EVAL · SCREENSHOT · CONSOLE · CLICK · SHUTDOWN) |
 | Lifecycle | One entry point: `pnpm tools-dev` (start / stop / run / status / logs / inspect / check) |
 
-Full architecture → [`docs/architecture.md`](docs/architecture.md). Skill protocol → [`docs/skills-protocol.md`](docs/skills-protocol.md). Agent adapter contract → [`docs/agent-adapters.md`](docs/agent-adapters.md).
+Full architecture → [`docs/architecture.md`](docs/architecture.md). Skill protocol → [`docs/skills-protocol.md`](docs/skills-protocol.md). Agent adapter contract → [`docs/agent-adapters.md`](docs/agent-adapters.md). React app preview workflow → [`docs/react-component-dev-usage.md`](docs/react-component-dev-usage.md).
 
 ---
 

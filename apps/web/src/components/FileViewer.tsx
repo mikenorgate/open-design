@@ -43,6 +43,10 @@ import {
   fetchProjectFilePreview,
   fetchProjectFiles,
   fetchProjectFileText,
+  fetchProjectDevServerStatus,
+  projectDevServerAppProxyUrl,
+  projectDevServerProxyUrl,
+  startProjectDevServer,
   uploadProjectFiles,
   liveArtifactPreviewUrl,
   projectFileUrl,
@@ -1004,6 +1008,22 @@ export function FileViewer({
     });
   }, [projectId, projectKind, file.name, file.kind, rendererMatch?.renderer.id, analytics.track]);
 
+  if (!file.artifactManifest && /\.(tsx|jsx)$/i.test(file.name)) {
+    return (
+      <ProductionReactSourceViewer
+        projectId={projectId}
+        file={file}
+        filesRefreshKey={filesRefreshKey}
+        streaming={Boolean(streaming)}
+        commentQueueOnSend={commentQueueOnSend}
+        commentSendDisabled={commentSendDisabled}
+        onSendBoardCommentAttachments={onSendBoardCommentAttachments}
+        onFileSaved={onFileSaved}
+        onCommentModeChange={onCommentModeChange}
+      />
+    );
+  }
+
   if (rendererMatch?.renderer.id === 'html' || rendererMatch?.renderer.id === 'deck-html') {
     return (
       <HtmlViewer
@@ -1060,7 +1080,7 @@ export function FileViewer({
     return <ImageViewer projectId={projectId} file={file} />;
   }
   if (file.kind === 'text' || file.kind === 'code') {
-    return <TextViewer projectId={projectId} file={file} />;
+    return <TextViewer projectId={projectId} file={file} onFileSaved={onFileSaved} />;
   }
   if (
     file.kind === 'pdf' ||
@@ -9642,22 +9662,554 @@ export function SvgViewer({
   );
 }
 
-function TextViewer({
+function storybookIdPart(value: string): string {
+  // Match Storybook's toId-ish behavior: separators become dashes, but
+  // camelCase/PascalCase inside a segment is preserved before lowercasing.
+  // Example: "Auth/AuthLayout" -> "auth-authlayout", not
+  // "auth-auth-layout".
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function storybookPathFromStorySource(source: string): string | null {
+  const titleMatch = source.match(/title\s*:\s*['"]([^'"]+)['"]/);
+  const title = titleMatch?.[1]?.trim();
+  if (!title) return null;
+
+  const exportMatches = [...source.matchAll(/export\s+(?:const|function)\s+([A-Z][A-Za-z0-9_]*)/g)]
+    .map((match) => match[1])
+    .filter((name): name is string => Boolean(name && name !== 'default'));
+  const storyName = exportMatches[0] ?? 'Primary';
+  return `/story/${storybookIdPart(title)}--${storybookIdPart(storyName)}`;
+}
+
+function storybookStoryIdFromPath(storybookPath: string | null): string | null {
+  if (!storybookPath) return null;
+  const match = storybookPath.match(/^\/story\/([^/?#]+)/);
+  return match?.[1] ? decodeURIComponent(match[1]) : null;
+}
+
+function storyCandidatesForReactSource(fileName: string): string[] {
+  if (/\.stories\.[jt]sx?$/i.test(fileName) || /\.story\.[jt]sx?$/i.test(fileName)) {
+    return [fileName];
+  }
+  const extMatch = fileName.match(/\.[jt]sx?$/i);
+  if (!extMatch) return [];
+  const ext = extMatch[0];
+  const base = fileName.slice(0, -ext.length);
+  return [
+    `${base}.stories${ext}`,
+    `${base}.story${ext}`,
+    `${base}.stories.tsx`,
+    `${base}.stories.jsx`,
+    `${base}.stories.ts`,
+    `${base}.stories.js`,
+    `${base}.story.tsx`,
+    `${base}.story.jsx`,
+    `${base}.story.ts`,
+    `${base}.story.js`,
+  ];
+}
+
+async function findStoryFileForReactSource(projectId: string, fileName: string): Promise<string | null> {
+  const candidates = new Set(storyCandidatesForReactSource(fileName));
+  if (candidates.size === 0) return null;
+  try {
+    const files = await fetchProjectFiles(projectId);
+    return files.find((item) => candidates.has(item.name))?.name ?? null;
+  } catch {
+    return null;
+  }
+}
+
+type ProductionReactPreviewTarget = {
+  elementId: string;
+  selector: string;
+  tagName?: string;
+  text?: string;
+  label?: string;
+  htmlHint?: string;
+  position: { x: number; y: number; width: number; height: number };
+  style?: Record<string, string>;
+};
+
+function ProductionReactSourceViewer({
   projectId,
   file,
+  filesRefreshKey,
+  streaming,
+  commentQueueOnSend,
+  commentSendDisabled,
+  onSendBoardCommentAttachments,
+  onFileSaved,
+  onCommentModeChange,
 }: {
   projectId: string;
   file: ProjectFile;
+  filesRefreshKey?: number;
+  streaming?: boolean;
+  commentQueueOnSend?: boolean;
+  commentSendDisabled?: boolean;
+  onSendBoardCommentAttachments?: (attachments: ChatCommentAttachment[]) => Promise<boolean | void> | boolean | void;
+  onFileSaved?: () => Promise<void> | void;
+  onCommentModeChange?: (active: boolean) => void;
+}) {
+  const [mode, setMode] = useState<'preview' | 'source'>('preview');
+  const [status, setStatus] = useState<'loading' | 'running' | 'stopped' | 'error'>('loading');
+  const [message, setMessage] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [storybookPath, setStorybookPath] = useState<string | null>(null);
+  const [inspectMode, setInspectMode] = useState(false);
+  const [commentMode, setCommentMode] = useState(false);
+  const [drawMode, setDrawMode] = useState(false);
+  const [selectedTarget, setSelectedTarget] = useState<ProductionReactPreviewTarget | null>(null);
+  const [inspectDraft, setInspectDraft] = useState<Record<string, string>>({});
+  const [commentDraft, setCommentDraft] = useState('');
+  const [sendingComment, setSendingComment] = useState(false);
+  const [commentError, setCommentError] = useState<string | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const lastAutoReloadKeyRef = useRef<string | null>(null);
+
+  const loadStatus = useCallback(async () => {
+    try {
+      const next = await fetchProjectDevServerStatus(projectId);
+      setStatus(next.status === 'running' ? 'running' : next.status === 'error' ? 'error' : 'stopped');
+      setMessage(next.status === 'error' ? next.lastError ?? 'Dev server failed.' : null);
+    } catch (err) {
+      setStatus('error');
+      setMessage(err instanceof Error ? err.message : 'Could not read dev server status.');
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    void loadStatus();
+  }, [loadStatus]);
+
+  useEffect(() => {
+    const autoReloadKey = `${file.name}:${file.mtime}:${filesRefreshKey ?? 0}`;
+    if (lastAutoReloadKeyRef.current === null) {
+      lastAutoReloadKeyRef.current = autoReloadKey;
+      return;
+    }
+    if (lastAutoReloadKeyRef.current === autoReloadKey) return;
+    lastAutoReloadKeyRef.current = autoReloadKey;
+    setReloadKey((value) => value + 1);
+  }, [file.name, file.mtime, filesRefreshKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function resolveStory() {
+      const storyFile = await findStoryFileForReactSource(projectId, file.name);
+      if (!storyFile) {
+        if (!cancelled) setStorybookPath(null);
+        return;
+      }
+      const source = await fetchProjectFileText(projectId, storyFile);
+      if (cancelled) return;
+      setStorybookPath(source ? storybookPathFromStorySource(source) : null);
+    }
+    void resolveStory();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, file.name]);
+
+  useEffect(() => {
+    function targetFromData(data: {
+      elementId?: string;
+      selector?: string;
+      tagName?: string;
+      text?: string;
+      label?: string;
+      htmlHint?: string;
+      position?: Partial<ProductionReactPreviewTarget['position']>;
+      style?: Record<string, string>;
+    }): ProductionReactPreviewTarget | null {
+      if (!data.elementId || !data.selector) return null;
+      return {
+        elementId: data.elementId,
+        selector: data.selector,
+        tagName: data.tagName,
+        text: data.text,
+        label: data.label,
+        htmlHint: data.htmlHint,
+        position: {
+          x: Number(data.position?.x ?? 0),
+          y: Number(data.position?.y ?? 0),
+          width: Number(data.position?.width ?? 0),
+          height: Number(data.position?.height ?? 0),
+        },
+        style: data.style,
+      };
+    }
+    function onMessage(event: MessageEvent) {
+      const data = event.data as ({ type?: string } & Parameters<typeof targetFromData>[0]) | null;
+      if (!data || (data.type !== 'od:inspect-target' && data.type !== 'od:comment-target')) return;
+      const target = targetFromData(data);
+      if (!target) return;
+      setSelectedTarget(target);
+      setInspectDraft({
+        color: target.style?.color ?? '',
+        backgroundColor: target.style?.backgroundColor ?? '',
+        fontSize: target.style?.fontSize ?? '',
+        fontWeight: target.style?.fontWeight ?? '',
+        borderRadius: target.style?.borderRadius ?? '',
+        padding: target.style?.padding ?? '',
+      });
+      if (data.type === 'od:comment-target') setCommentMode(true);
+    }
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, []);
+
+  const postPreviewMode = useCallback((payload: Record<string, unknown>) => {
+    iframeRef.current?.contentWindow?.postMessage(payload, '*');
+    try {
+      const nested = iframeRef.current?.contentDocument?.querySelectorAll('iframe') ?? [];
+      nested.forEach((frame) => frame.contentWindow?.postMessage(payload, '*'));
+    } catch {
+      // Best effort; proxied Storybook is same-origin in source dev, but keep this safe.
+    }
+  }, []);
+
+  const syncPreviewModes = useCallback(() => {
+    postPreviewMode({ type: 'od:inspect-mode', enabled: inspectMode });
+    postPreviewMode({ type: 'od:comment-mode', enabled: commentMode, mode: 'inspect' });
+  }, [commentMode, inspectMode, postPreviewMode]);
+
+  useEffect(() => {
+    syncPreviewModes();
+  }, [syncPreviewModes, reloadKey]);
+
+  useEffect(() => {
+    onCommentModeChange?.(commentMode || drawMode);
+  }, [commentMode, drawMode, onCommentModeChange]);
+
+  function applyInspectDraft(prop: string, value: string) {
+    if (!selectedTarget) return;
+    setInspectDraft((current) => ({ ...current, [prop]: value }));
+    postPreviewMode({
+      type: 'od:inspect-set',
+      elementId: selectedTarget.elementId,
+      selector: selectedTarget.selector,
+      prop,
+      value,
+    });
+  }
+
+  function targetToPreviewCommentTarget(target: ProductionReactPreviewTarget): PreviewCommentTarget {
+    return {
+      filePath: file.name,
+      elementId: target.elementId,
+      selector: target.selector,
+      label: target.label || target.tagName || target.elementId,
+      text: target.text || '',
+      position: target.position,
+      htmlHint: target.htmlHint || '',
+      style: normalizeAnnotationStyle(target.style),
+      selectionKind: 'element',
+    };
+  }
+
+  async function sendReactComment(action: 'queue' | 'send') {
+    if (!selectedTarget || !commentDraft.trim() || !onSendBoardCommentAttachments || sendingComment) return;
+    if (action === 'send' && commentSendDisabled) return;
+    setSendingComment(true);
+    setCommentError(null);
+    try {
+      const accepted = await onSendBoardCommentAttachments(buildBoardCommentAttachments({
+        target: targetToPreviewCommentTarget(selectedTarget),
+        notes: [commentDraft.trim()],
+      }));
+      if (accepted === false) return;
+      setCommentDraft('');
+      setSelectedTarget(null);
+      if (!commentQueueOnSend || action === 'send') setCommentMode(false);
+    } catch (err) {
+      setCommentError(err instanceof Error ? err.message : 'Could not send comment.');
+    } finally {
+      setSendingComment(false);
+    }
+  }
+
+  function resetInspectDraft() {
+    if (!selectedTarget) return;
+    postPreviewMode({
+      type: 'od:inspect-reset',
+      elementId: selectedTarget.elementId,
+      selector: selectedTarget.selector,
+    });
+    setInspectDraft({
+      color: selectedTarget.style?.color ?? '',
+      backgroundColor: selectedTarget.style?.backgroundColor ?? '',
+      fontSize: selectedTarget.style?.fontSize ?? '',
+      fontWeight: selectedTarget.style?.fontWeight ?? '',
+      borderRadius: selectedTarget.style?.borderRadius ?? '',
+      padding: selectedTarget.style?.padding ?? '',
+    });
+  }
+
+  async function startDevServer() {
+    setStarting(true);
+    setMessage(null);
+    try {
+      await startProjectDevServer(projectId);
+      await loadStatus();
+      setReloadKey((value) => value + 1);
+    } catch (err) {
+      setStatus('error');
+      setMessage(err instanceof Error ? err.message : 'Could not start dev server.');
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  const proxyBaseUrl = projectDevServerProxyUrl(projectId);
+  const appProxyBaseUrl = projectDevServerAppProxyUrl(projectId);
+  const storybookStoryId = storybookStoryIdFromPath(storybookPath);
+  const previewParams = new URLSearchParams({
+    odFile: file.name,
+    odReload: String(reloadKey),
+  });
+  const useStoryCanvas = Boolean(storybookStoryId);
+  const previewUrl = useStoryCanvas
+    ? `${proxyBaseUrl}iframe.html?${new URLSearchParams({
+        ...Object.fromEntries(previewParams.entries()),
+        viewMode: 'story',
+        id: storybookStoryId ?? '',
+      }).toString()}`
+    : `${appProxyBaseUrl}?${previewParams.toString()}`;
+  const storybookManagerUrl = storybookPath
+    ? `${proxyBaseUrl}?${new URLSearchParams({ path: storybookPath }).toString()}`
+    : null;
+
+  return (
+    <div className="viewer production-react-viewer">
+      <div className="viewer-toolbar">
+        <div className="viewer-toolbar-left production-react-viewer-title">
+          <span>React visual editor</span>
+          <code>{file.name}</code>
+          <span className="production-react-story-chip">{useStoryCanvas ? 'Story canvas' : 'App canvas'}</span>
+        </div>
+        <div className="viewer-toolbar-actions">
+          <button
+            type="button"
+            className={`viewer-action${mode === 'preview' ? ' active' : ''}`}
+            onClick={() => setMode('preview')}
+          >
+            Preview
+          </button>
+          <button
+            type="button"
+            className={`viewer-action${mode === 'source' ? ' active' : ''}`}
+            onClick={() => setMode('source')}
+          >
+            Source
+          </button>
+          {mode === 'preview' ? (
+            <>
+              <button
+                type="button"
+                className={`viewer-action${inspectMode ? ' active' : ''}`}
+                aria-pressed={inspectMode}
+                onClick={() => {
+                  setInspectMode((value) => !value);
+                  setCommentMode(false);
+                  setDrawMode(false);
+                  setSelectedTarget(null);
+                }}
+              >
+                Inspect
+              </button>
+              <button
+                type="button"
+                className={`viewer-action${commentMode ? ' active' : ''}`}
+                aria-pressed={commentMode}
+                onClick={() => {
+                  setCommentMode((value) => !value);
+                  setInspectMode(false);
+                  setDrawMode(false);
+                  setSelectedTarget(null);
+                }}
+              >
+                Comment
+              </button>
+              <button
+                type="button"
+                className={`viewer-action${drawMode ? ' active' : ''}`}
+                aria-pressed={drawMode}
+                onClick={() => {
+                  setDrawMode((value) => !value);
+                  setCommentMode(false);
+                  setInspectMode(false);
+                  setSelectedTarget(null);
+                }}
+              >
+                <RemixIcon name="pencil-line" size={14} />
+                <span>Draw</span>
+              </button>
+              {storybookManagerUrl ? (
+                <a className="viewer-action" href={storybookManagerUrl} target="_blank" rel="noreferrer noopener">
+                  Open Storybook
+                </a>
+              ) : null}
+              <button
+                type="button"
+                className="viewer-action"
+                onClick={() => {
+                  void loadStatus();
+                  setReloadKey((value) => value + 1);
+                }}
+              >
+                <Icon name="reload" size={13} />
+                <span>Reload</span>
+              </button>
+            </>
+          ) : null}
+        </div>
+      </div>
+      {mode === 'source' ? (
+        <TextViewer projectId={projectId} file={file} onFileSaved={onFileSaved} />
+      ) : status === 'running' ? (
+        <div className="production-react-preview-body">
+          <PreviewDrawOverlay
+            active={drawMode}
+            onActiveChange={setDrawMode}
+            captureTarget={null}
+            filePath={file.name}
+            sendDisabled={Boolean(streaming || commentSendDisabled)}
+            sendDisabledReason="A task is currently running"
+          >
+            <iframe
+              ref={iframeRef}
+              key={reloadKey}
+              className="production-react-preview-frame"
+              data-od-active="true"
+              data-od-render-mode="url-load"
+              title={`Live preview for ${file.name}`}
+              src={previewUrl}
+              sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads"
+              onLoad={() => syncPreviewModes()}
+            />
+          </PreviewDrawOverlay>
+          {selectedTarget ? (
+            <div className="production-react-inspect-card">
+              <div>
+                <strong>{commentMode ? 'Comment target' : selectedTarget.tagName || 'element'}</strong>
+                <code>{selectedTarget.elementId}</code>
+              </div>
+              {selectedTarget.text ? <p>{selectedTarget.text}</p> : null}
+              {commentMode ? (
+                <div className="production-react-comment-form">
+                  <textarea
+                    value={commentDraft}
+                    onChange={(event) => setCommentDraft(event.target.value)}
+                    placeholder="Add a note for this element"
+                    disabled={sendingComment}
+                  />
+                  {commentError ? <p className="production-react-comment-error">{commentError}</p> : null}
+                  <div>
+                    <button
+                      type="button"
+                      className="viewer-action"
+                      disabled={sendingComment || !commentDraft.trim() || !onSendBoardCommentAttachments}
+                      onClick={() => void sendReactComment('queue')}
+                    >
+                      {sendingComment ? 'Sending…' : 'Queue'}
+                    </button>
+                    <button
+                      type="button"
+                      className="viewer-action primary"
+                      disabled={sendingComment || !commentDraft.trim() || !onSendBoardCommentAttachments || Boolean(commentSendDisabled)}
+                      onClick={() => void sendReactComment('send')}
+                    >
+                      {sendingComment ? 'Sending…' : 'Send'}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              {inspectMode ? (
+                <div className="production-react-style-grid">
+                  {(
+                    [
+                      { prop: 'color', label: 'Text' },
+                      { prop: 'backgroundColor', label: 'Background' },
+                      { prop: 'fontSize', label: 'Font size' },
+                      { prop: 'fontWeight', label: 'Weight' },
+                      { prop: 'borderRadius', label: 'Radius' },
+                      { prop: 'padding', label: 'Padding' },
+                    ] as const
+                  ).map(({ prop, label }) => (
+                    <label key={prop}>
+                      <span>{label}</span>
+                      <input
+                        value={inspectDraft[prop] ?? ''}
+                        placeholder={prop === 'fontSize' ? '24px' : prop === 'fontWeight' ? '700' : undefined}
+                        onChange={(event) => applyInspectDraft(prop, event.target.value)}
+                      />
+                    </label>
+                  ))}
+                  <button type="button" className="viewer-action" onClick={resetInspectDraft}>
+                    Reset styles
+                  </button>
+                </div>
+              ) : null}
+              <button type="button" className="viewer-action" onClick={() => setSelectedTarget(null)}>
+                Clear
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        <div className="viewer-empty production-react-preview-empty">
+          <h3>Start the dev server to edit visually</h3>
+          {message ? <p>{message}</p> : <p>This source file is edited against the live React app, not a standalone TSX renderer.</p>}
+          <button
+            type="button"
+            className="viewer-action primary"
+            disabled={starting}
+            onClick={() => void startDevServer()}
+          >
+            {starting ? 'Starting…' : 'Start dev server'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TextViewer({
+  projectId,
+  file,
+  onFileSaved,
+}: {
+  projectId: string;
+  file: ProjectFile;
+  onFileSaved?: () => Promise<void> | void;
 }) {
   const t = useT();
   const [text, setText] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [copied, setCopied] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   useEffect(() => {
     setText(null);
     let cancelled = false;
     void fetchProjectFileText(projectId, file.name).then((t) => {
-      if (!cancelled) setText(t ?? '');
+      if (!cancelled) {
+        const nextText = t ?? '';
+        setText(nextText);
+        setDraft(nextText);
+        setEditing(false);
+        setSaveError(null);
+      }
     });
     return () => {
       cancelled = true;
@@ -9694,6 +10246,26 @@ function TextViewer({
   );
   const lineCount = displayText ? displayText.split('\n').length : 0;
 
+  async function saveDraft() {
+    if (text == null || saving) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const result = await writeProjectTextFileDetailed(projectId, file.name, draft);
+      if (!result.ok) {
+        setSaveError(result.message);
+        return;
+      }
+      setText(draft);
+      setEditing(false);
+      await onFileSaved?.();
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'Save failed.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <div className="viewer text-viewer">
       <div className="viewer-toolbar">
@@ -9708,15 +10280,47 @@ function TextViewer({
             <Icon name="reload" size={13} />
             <span>{t('fileViewer.reload')}</span>
           </button>
-          <button
-            type="button"
-            className="viewer-action"
-            disabled
-            title={t('fileViewer.saveDisabled')}
-          >
-            <Icon name="check" size={13} />
-            <span>{t('fileViewer.save')}</span>
-          </button>
+          {editing ? (
+            <>
+              <button
+                type="button"
+                className="viewer-action"
+                disabled={saving}
+                onClick={() => {
+                  setDraft(text ?? '');
+                  setEditing(false);
+                  setSaveError(null);
+                }}
+                title={t('common.cancel')}
+              >
+                <span>{t('common.cancel')}</span>
+              </button>
+              <button
+                type="button"
+                className="viewer-action primary"
+                disabled={saving}
+                onClick={() => void saveDraft()}
+                title={t('fileViewer.save')}
+              >
+                <Icon name="check" size={13} />
+                <span>{saving ? 'Saving…' : t('fileViewer.save')}</span>
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              className="viewer-action"
+              disabled={text == null}
+              onClick={() => {
+                setDraft(text ?? '');
+                setEditing(true);
+                setSaveError(null);
+              }}
+              title={t('common.edit')}
+            >
+              <span>{t('common.edit')}</span>
+            </button>
+          )}
           <button
             type="button"
             className="viewer-action"
@@ -9731,6 +10335,16 @@ function TextViewer({
       <div className="viewer-body">
         {text === null ? (
           <div className="viewer-empty">{t('fileViewer.loading')}</div>
+        ) : editing ? (
+          <div className="viewer-edit-shell">
+            {saveError ? <div className="viewer-edit-error">{saveError}</div> : null}
+            <textarea
+              className="viewer-source-editor"
+              value={draft}
+              spellCheck={false}
+              onChange={(event) => setDraft(event.target.value)}
+            />
+          </div>
         ) : displayText !== null && lineCount > 0 ? (
           <CodeWithLines text={displayText} />
         ) : (

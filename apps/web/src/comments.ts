@@ -436,6 +436,10 @@ export function trimHtmlHint(value: string): string {
   return text.length > 180 ? `${text.slice(0, 177)}...` : text;
 }
 
+function isProductionReactCommentAttachment(item: ChatCommentAttachment): boolean {
+  return /\.[jt]sx$/i.test(item.filePath) || /live React app/i.test(item.filePath);
+}
+
 function renderCommentAttachmentContext(commentAttachments: ChatCommentAttachment[]): string {
   const lines = [
     '',
@@ -443,6 +447,12 @@ function renderCommentAttachmentContext(commentAttachments: ChatCommentAttachmen
     '<attached-preview-comments>',
     "Hard scope: change ONLY the elements identified below by selector / position / pod members. Do NOT modify sibling sub-pages, parent layout, global CSS, design tokens, or unrelated rules even if you notice issues there — surface those as a follow-up note in your reply instead of editing them. If the user's request cannot be satisfied without touching outside this scope, ask the user before proceeding. For visual marks, inspect the screenshot and modify the marked region first.",
   ];
+  const hasReactTargets = commentAttachments.some(isProductionReactCommentAttachment);
+  if (hasReactTargets) {
+    lines.push(
+      'React source context: the targets below come from production React component/page files, not standalone generated HTML. Make changes according to React standards: edit the owning TSX/JSX component or page, preserve component boundaries and props, prefer existing design-system components/tokens/Tailwind classes over ad-hoc DOM/CSS rewrites, keep accessibility semantics intact, and rely on the project dev server/Storybook for validation.',
+    );
+  }
   commentAttachments.forEach((item) => {
     const position = normalizePosition(item.pagePosition);
     const selectionKind =
@@ -452,6 +462,7 @@ function renderCommentAttachmentContext(commentAttachments: ChatCommentAttachmen
       `${item.order}. ${item.elementId}`,
       `targetKind: ${selectionKind}`,
       `file: ${item.filePath}`,
+      isProductionReactCommentAttachment(item) ? 'sourceType: production-react-component-or-page' : 'sourceType: generated-preview-artifact',
       `label: ${item.label || '(unlabeled)'}`,
       `position: x${position.x} y${position.y} ${position.width}x${position.height}`,
       `currentText: ${trimContextText(item.currentText || '') || '(empty)'}`,

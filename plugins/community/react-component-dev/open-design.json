@@ -1,0 +1,141 @@
+{
+  "$schema": "https://open-design.ai/schemas/plugin.v1.json",
+  "specVersion": "1.0.0",
+  "name": "react-component-dev",
+  "title": "React Component Development",
+  "version": "0.1.0",
+  "description": "Develop production React functional components with TypeScript, Tailwind CSS, and shadcn/ui. Audits the target project's existing conventions before writing any code.",
+  "license": "MIT",
+  "tags": [
+    "react",
+    "component",
+    "tailwind",
+    "shadcn",
+    "typescript",
+    "frontend"
+  ],
+  "compat": {
+    "agentSkills": [
+      {
+        "path": "./SKILL.md"
+      }
+    ]
+  },
+  "od": {
+    "kind": "skill",
+    "taskKind": "new-generation",
+    "mode": "prototype",
+    "scenario": "frontend-design",
+    "useCase": {
+      "query": "Build a React component for {{componentName}} at {{targetPath}}."
+    },
+    "context": {
+      "skills": [
+        {
+          "path": "./SKILL.md"
+        }
+      ],
+      "atoms": [
+        "code-import",
+        "design-extract",
+        "todo-write",
+        "file-write",
+        "critique-theater"
+      ]
+    },
+    "inputs": [
+      {
+        "name": "componentName",
+        "type": "string",
+        "required": true,
+        "label": "Component name",
+        "placeholder": "KpiCard"
+      },
+      {
+        "name": "targetPath",
+        "type": "string",
+        "required": false,
+        "label": "Target directory",
+        "default": "src/components/",
+        "placeholder": "src/components/metrics/"
+      },
+      {
+        "name": "variant",
+        "type": "enum",
+        "values": [
+          "new-component",
+          "modify-existing",
+          "replicate-prototype"
+        ],
+        "default": "new-component",
+        "label": "Task"
+      },
+      {
+        "name": "existingPath",
+        "type": "string",
+        "required": false,
+        "label": "Existing component to modify",
+        "placeholder": "src/components/metrics/KpiCard.tsx"
+      },
+      {
+        "name": "prototypePath",
+        "type": "string",
+        "required": false,
+        "label": "OD prototype to replicate",
+        "placeholder": ".od/artifacts/dashboard-redesign/index.html"
+      },
+      {
+        "name": "createStory",
+        "type": "boolean",
+        "default": true,
+        "label": "Create Storybook story"
+      },
+      {
+        "name": "createTest",
+        "type": "boolean",
+        "default": true,
+        "label": "Create unit test"
+      }
+    ],
+    "pipeline": {
+      "stages": [
+        {
+          "id": "audit",
+          "atoms": [
+            "code-import",
+            "design-extract"
+          ],
+          "description": "Walk the project structure, extract design tokens, detect conventions"
+        },
+        {
+          "id": "plan",
+          "atoms": [
+            "todo-write"
+          ],
+          "description": "Produce a plan: which files to create, what props, what imports"
+        },
+        {
+          "id": "generate",
+          "atoms": [
+            "file-write"
+          ],
+          "description": "Write the component .tsx, optional .test.tsx and .stories.tsx"
+        },
+        {
+          "id": "critique",
+          "atoms": [
+            "critique-theater"
+          ],
+          "repeat": true,
+          "until": "critique.score>=4 || iterations>=3",
+          "description": "Self-review: does the component match conventions? Are there anti-patterns?"
+        }
+      ]
+    },
+    "capabilities": [
+      "prompt:inject",
+      "fs:read",
+      "fs:write"
+    ]
+  }
+}

@@ -12,6 +12,7 @@ import type { ProjectBrowserWorkspaceTab, ProjectTabsState } from '@open-design/
 import { migrateCritique } from './critique/persistence.js';
 import { migrateMediaTasks } from './media-tasks.js';
 import { migratePlugins } from './plugins/persistence.js';
+import { initComponentSyncTable } from './dev-server/component-status.js';
 
 type SqliteDb = Database.Database;
 type DbRow = Record<string, any>;
@@ -346,6 +347,7 @@ function migrate(db: SqliteDb): void {
   migrateCritique(db);
   migrateMediaTasks(db);
   migratePlugins(db);
+  initComponentSyncTable(db);
 }
 
 function migratePreviewCommentsSlideKey(db: SqliteDb): void {
