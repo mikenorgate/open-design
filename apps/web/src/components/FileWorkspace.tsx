@@ -8093,7 +8093,35 @@ function AppPreviewTab({
   const [sendingComment, setSendingComment] = useState(false);
   const [commentError, setCommentError] = useState<string | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
-  const src = `${projectDevServerAppProxyUrl(projectId)}?odReload=${reloadKey}-${localReloadKey}`;
+  const lastAppRouteRef = useRef('/');
+  const appProxyPath = projectDevServerAppProxyUrl(projectId);
+  const src = `${appProxyPath}?odReload=${reloadKey}-${localReloadKey}`;
+
+  const recoverEscapedPreviewFrame = useCallback(() => {
+    const frame = iframeRef.current;
+    if (!frame?.contentWindow) return;
+    try {
+      const frameUrl = new URL(frame.contentWindow.location.href);
+      if (frameUrl.origin !== window.location.origin) return;
+      const expectedPath = appProxyPath.replace(/\/$/, '');
+      const escapedOpenDesignRoute = !(
+        frameUrl.pathname === expectedPath
+        || frameUrl.pathname.startsWith(`${expectedPath}/`)
+      );
+      const hasAppPreviewRuntime = Boolean(
+        frame.contentDocument?.querySelector('script[data-od-app-preview-runtime]'),
+      );
+      if (escapedOpenDesignRoute && !hasAppPreviewRuntime) {
+        const rememberedRoute = lastAppRouteRef.current || `${frameUrl.pathname}${frameUrl.search}${frameUrl.hash}`;
+        const appRouteUrl = new URL(rememberedRoute, window.location.origin);
+        const appRoutePath = appRouteUrl.pathname === '/' ? '/' : appRouteUrl.pathname;
+        const nextPath = `${expectedPath}${appRoutePath}`;
+        frame.src = `${nextPath}${appRouteUrl.search}${appRouteUrl.hash}`;
+      }
+    } catch {
+      // Cross-origin or inaccessible frames cannot be repaired from here.
+    }
+  }, [appProxyPath]);
 
   const postPreviewMode = useCallback((payload: Record<string, unknown>) => {
     iframeRef.current?.contentWindow?.postMessage(payload, '*');
@@ -8103,6 +8131,11 @@ function AppPreviewTab({
     postPreviewMode({ type: 'od:inspect-mode', enabled: inspectMode });
     postPreviewMode({ type: 'od:comment-mode', enabled: commentMode, mode: 'inspect' });
   }, [commentMode, inspectMode, postPreviewMode]);
+
+  const handlePreviewFrameLoad = useCallback(() => {
+    syncPreviewModes();
+    window.setTimeout(recoverEscapedPreviewFrame, 0);
+  }, [recoverEscapedPreviewFrame, syncPreviewModes]);
 
   useEffect(() => { syncPreviewModes(); }, [syncPreviewModes, localReloadKey, reloadKey]);
   useEffect(() => { onCommentModeChange?.(commentMode || drawMode); }, [commentMode, drawMode, onCommentModeChange]);
@@ -8119,7 +8152,7 @@ function AppPreviewTab({
       if (event.source !== iframeRef.current?.contentWindow) return;
       const data = event.data as ({ type?: string; context?: AppPreviewPageContext } & Parameters<typeof targetFromData>[0]) | null;
       if (!data) return;
-      if (data.type === 'od:react-page-context') { const ctx = data.context ?? null; setPageContext(ctx); onAppPreviewContextChange?.(ctx); return; }
+      if (data.type === 'od:react-page-context') { const ctx = data.context ?? null; lastAppRouteRef.current = ctx?.route || lastAppRouteRef.current; setPageContext(ctx); onAppPreviewContextChange?.(ctx); return; }
       if (data.type !== 'od:inspect-target' && data.type !== 'od:comment-target') return;
       const target = targetFromData(data);
       if (!target) return;
@@ -8204,7 +8237,7 @@ function AppPreviewTab({
           sendDisabled={Boolean(streaming || commentSendDisabled)}
           sendDisabledReason="A task is currently running"
         >
-          <iframe ref={iframeRef} key={`${reloadKey}-${localReloadKey}`} className="production-react-preview-frame" data-od-active="true" data-od-render-mode="url-load" title="App Preview" src={src} sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads" onLoad={() => syncPreviewModes()} />
+          <iframe ref={iframeRef} key={`${reloadKey}-${localReloadKey}`} className="production-react-preview-frame" data-od-active="true" data-od-render-mode="url-load" title="App Preview" src={src} sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads" onLoad={handlePreviewFrameLoad} />
         </PreviewDrawOverlay>
         {selectedTarget ? (
           <div className="production-react-inspect-card">
