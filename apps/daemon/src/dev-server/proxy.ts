@@ -63,8 +63,13 @@ function injectBridges(
     } catch (_) { return null; }
   }
   try {
-    var visibleAppPath = appVisiblePathFromLocation();
-    if (visibleAppPath && window.location.pathname.indexOf(prefix) === 0) history.replaceState(history.state, '', visibleAppPath);
+    // Only rewrite the URL when loaded directly in a top-level window.
+    // Inside an OD iframe (allow-same-origin) this would manipulate the
+    // parent window's history and trigger the OD router to navigate away.
+    if (window === window.top) {
+      var visibleAppPath = appVisiblePathFromLocation();
+      if (visibleAppPath && window.location.pathname.indexOf(prefix) === 0) history.replaceState(history.state, '', visibleAppPath);
+    }
   } catch (_) {}
   function isExternalProtocol(url){ return /^(?:[a-z][a-z0-9+.-]*:)?\\/\\//i.test(String(url || '')); }
   function appPath(path){ return prefix + '/' + String(path || '').replace(/^\\/+/, ''); }
@@ -723,7 +728,14 @@ async function proxyHttpRequest(
       proxyRes.on('end', () => {
         const source = Buffer.concat(chunks).toString('utf8');
         const withRewrittenUrls = rewriteRootRelativeReferences(source, proxyBasePath);
-        const localPort = req.socket.localPort ?? devPort;
+        // Use the port from the Host header the browser sent (e.g.
+        // "localhost:55074") rather than req.socket.localPort, which can
+        // reflect an internal socket port when the daemon is reached
+        // through a dev-proxy or Electron sidecar layer and would produce
+        // a WebSocket URL the browser cannot connect to.
+        const hostHeader = String(req.headers.host ?? '');
+        const hostPort = hostHeader ? Number(hostHeader.split(':')[1]) : NaN;
+        const localPort = Number.isFinite(hostPort) && hostPort > 0 ? hostPort : (req.socket.localPort ?? devPort);
         const proxyWsBase = `ws://127.0.0.1:${localPort}${proxyBasePath}/`;
         const modified = isHtml ? injectBridges(withRewrittenUrls, devUrl, proxyWsBase, routeName, proxyBasePath) : withRewrittenUrls;
         res.removeHeader('content-encoding');
