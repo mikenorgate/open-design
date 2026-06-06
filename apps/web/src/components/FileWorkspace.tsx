@@ -2149,6 +2149,7 @@ export function FileWorkspace({
           <AppPreviewTab
             projectId={projectId}
             reloadKey={appPreviewReloadKey}
+            initialPath={suggestAppPreviewInitialPath(visibleFiles)}
             streaming={streaming}
             commentQueueOnSend={commentQueueOnSend}
             commentSendDisabled={commentSendDisabled}
@@ -4057,6 +4058,91 @@ function isLiveArtifactImplementationPath(name: string): boolean {
 
 const APP_PREVIEW_TAB = '__app_preview__';
 const APP_PREVIEW_COMMENT_FILE_PATH = 'App Preview (live React app)';
+const APP_PREVIEW_ROUTE_STORAGE_PREFIX = 'od:app-preview-route:';
+
+function normalizeAppPreviewRoute(value: string | null | undefined): string | null {
+  const trimmed = String(value ?? '').trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(trimmed, 'http://app.local');
+    parsed.searchParams.delete('odReload');
+    const route = `${parsed.pathname || '/'}${parsed.search}${parsed.hash}`;
+    return route.startsWith('/') ? route : `/${route}`;
+  } catch {
+    return trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+  }
+}
+
+function stripAppProxyRoutePrefix(route: string | null, appProxyPath: string): string | null {
+  const normalized = normalizeAppPreviewRoute(route);
+  if (!normalized) return null;
+  const parsed = new URL(normalized, 'http://app.local');
+  const expected = appProxyPath.replace(/\/$/, '');
+  if (parsed.pathname === expected) return `/${parsed.search}${parsed.hash}`.replace(/^\/(?=\?|#)/, '/');
+  if (parsed.pathname.startsWith(`${expected}/`)) {
+    const appPath = parsed.pathname.slice(expected.length) || '/';
+    return `${appPath}${parsed.search}${parsed.hash}`;
+  }
+  return normalized;
+}
+
+function storedAppPreviewRoute(projectId: string): string | null {
+  if (typeof window === 'undefined') return null;
+  try { return stripAppProxyRoutePrefix(window.localStorage.getItem(`${APP_PREVIEW_ROUTE_STORAGE_PREFIX}${projectId}`), projectDevServerAppProxyUrl(projectId)); }
+  catch { return null; }
+}
+
+function initialAppPreviewRoute(projectId: string, suggested: string | null | undefined): string {
+  const stored = storedAppPreviewRoute(projectId);
+  const preferred = normalizeAppPreviewRoute(suggested);
+  return (stored && stored !== '/') ? stored : preferred ?? stored ?? '/';
+}
+
+function rememberAppPreviewRoute(projectId: string, route: string | null | undefined): void {
+  const normalized = stripAppProxyRoutePrefix(route ? String(route) : null, projectDevServerAppProxyUrl(projectId));
+  if (!normalized || typeof window === 'undefined') return;
+  try { window.localStorage.setItem(`${APP_PREVIEW_ROUTE_STORAGE_PREFIX}${projectId}`, normalized); }
+  catch { /* ignore storage failures */ }
+}
+
+function buildAppPreviewSrc(appProxyPath: string, route: string, reloadToken: string): string {
+  const normalized = stripAppProxyRoutePrefix(route, appProxyPath) ?? '/';
+  const parsed = new URL(normalized, 'http://app.local');
+  const path = parsed.pathname === '/' ? '' : parsed.pathname.replace(/^\/+/, '');
+  const params = new URLSearchParams(parsed.search);
+  params.set('odReload', reloadToken);
+  const query = params.toString();
+  return `${appProxyPath}${path}${query ? `?${query}` : ''}${parsed.hash}`;
+}
+
+function routePathFromProjectFile(fileName: string): string | null {
+  const name = fileName.replace(/\\/g, '/');
+  if (/\.(test|spec|stories)\.[jt]sx?$/i.test(name)) return null;
+  let raw: string | null = null;
+  const srcRoutes = name.match(/^src\/routes\/(.+)\.[jt]sx?$/i);
+  if (srcRoutes?.[1]) raw = srcRoutes[1];
+  const appPage = name.match(/^app\/(.+)\/page\.[jt]sx?$/i);
+  if (!raw && appPage?.[1]) raw = appPage[1];
+  const pagesRoute = name.match(/^pages\/(.+)\.[jt]sx?$/i);
+  if (!raw && pagesRoute?.[1]) raw = pagesRoute[1];
+  const srcPageComponent = name.match(/^src\/pages\/(.+?)Page\.[jt]sx?$/i);
+  if (!raw && srcPageComponent?.[1]) raw = srcPageComponent[1];
+  if (!raw) return null;
+  const parts = raw.split('/').filter(Boolean).filter((part) => !['__root', '_layout', 'route', 'layout'].includes(part));
+  if (parts.length === 0 || parts[0] === 'index' || parts[0] === '_index') return '/';
+  if (parts.some((part) => part.startsWith('$') || /^\[.+\]$/.test(part))) return null;
+  const cleaned = parts.map((part) => part.replace(/^_index$/, '').replace(/\.route$/i, '').replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase()).filter(Boolean);
+  return cleaned.length > 0 ? `/${cleaned.join('/')}` : '/';
+}
+
+function suggestAppPreviewInitialPath(files: readonly ProjectFile[]): string | null {
+  const routes = Array.from(new Set(files.map((file) => routePathFromProjectFile(file.name)).filter((route): route is string => Boolean(route))));
+  if (routes.length === 0) return null;
+  for (const preferred of ['/login', '/sign-in', '/signin', '/dashboard', '/home']) {
+    if (routes.includes(preferred)) return preferred;
+  }
+  return routes.find((route) => route !== '/') ?? routes[0] ?? null;
+}
 
 type AppPreviewTarget = {
   elementId: string;
@@ -4079,6 +4165,7 @@ export interface AppPreviewPageContext {
 function AppPreviewTab({
   projectId,
   reloadKey,
+  initialPath,
   streaming,
   commentQueueOnSend,
   commentSendDisabled,
@@ -4088,6 +4175,7 @@ function AppPreviewTab({
 }: {
   projectId: string;
   reloadKey: number;
+  initialPath?: string | null;
   streaming?: boolean;
   commentQueueOnSend?: boolean;
   commentSendDisabled?: boolean;
@@ -4106,9 +4194,16 @@ function AppPreviewTab({
   const [sendingComment, setSendingComment] = useState(false);
   const [commentError, setCommentError] = useState<string | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
-  const lastAppRouteRef = useRef('/');
+  const [previewRoute, setPreviewRoute] = useState(() => initialAppPreviewRoute(projectId, initialPath));
+  const lastAppRouteRef = useRef(previewRoute);
   const appProxyPath = projectDevServerAppProxyUrl(projectId);
-  const src = `${appProxyPath}?odReload=${reloadKey}-${localReloadKey}`;
+  const src = buildAppPreviewSrc(appProxyPath, previewRoute, `${reloadKey}-${localReloadKey}`);
+
+  useEffect(() => {
+    const nextRoute = initialAppPreviewRoute(projectId, initialPath);
+    lastAppRouteRef.current = nextRoute;
+    setPreviewRoute(nextRoute);
+  }, [projectId, initialPath]);
 
   const recoverEscapedPreviewFrame = useCallback(() => {
     const frame = iframeRef.current;
@@ -4165,7 +4260,7 @@ function AppPreviewTab({
       if (event.source !== iframeRef.current?.contentWindow) return;
       const data = event.data as ({ type?: string; context?: AppPreviewPageContext } & Parameters<typeof targetFromData>[0]) | null;
       if (!data) return;
-      if (data.type === 'od:react-page-context') { const ctx = data.context ?? null; lastAppRouteRef.current = ctx?.route || lastAppRouteRef.current; setPageContext(ctx); onAppPreviewContextChange?.(ctx); return; }
+      if (data.type === 'od:react-page-context') { const ctx = data.context ?? null; const route = stripAppProxyRoutePrefix(ctx?.route ?? null, appProxyPath) ?? lastAppRouteRef.current; lastAppRouteRef.current = route; rememberAppPreviewRoute(projectId, route); setPreviewRoute(route); setPageContext(ctx); onAppPreviewContextChange?.(ctx); return; }
       if (data.type !== 'od:inspect-target' && data.type !== 'od:comment-target') return;
       const target = targetFromData(data);
       if (!target) return;
@@ -4175,7 +4270,7 @@ function AppPreviewTab({
     }
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
-  }, [onAppPreviewContextChange]);
+  }, [appProxyPath, onAppPreviewContextChange, projectId]);
 
   function reactContextForTarget(target: AppPreviewTarget): ChatCommentAttachment['reactContext'] | undefined {
     const pageComponents = target.react?.pageComponents?.length
