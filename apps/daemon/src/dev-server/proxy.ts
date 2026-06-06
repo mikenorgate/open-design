@@ -51,6 +51,21 @@ function injectBridges(
     ? `<script data-od-app-preview-runtime>(function(){
   var prefix = ${JSON.stringify(proxyBasePath)};
   var wsPrefix = ${JSON.stringify(proxyWsBase)};
+  function appVisiblePathFromLocation(){
+    try {
+      var path = window.location.pathname;
+      if (path === prefix) path = '/';
+      else if (path.indexOf(prefix + '/') === 0) path = '/' + path.slice(prefix.length + 1);
+      var params = new URLSearchParams(window.location.search || '');
+      params.delete('odReload');
+      var query = params.toString();
+      return path + (query ? '?' + query : '') + window.location.hash;
+    } catch (_) { return null; }
+  }
+  try {
+    var visibleAppPath = appVisiblePathFromLocation();
+    if (visibleAppPath && window.location.pathname.indexOf(prefix) === 0) history.replaceState(history.state, '', visibleAppPath);
+  } catch (_) {}
   function isExternalProtocol(url){ return /^(?:[a-z][a-z0-9+.-]*:)?\\/\\//i.test(String(url || '')); }
   function appPath(path){ return prefix + '/' + String(path || '').replace(/^\\/+/, ''); }
   function toAppHttpUrl(input){
