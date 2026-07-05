@@ -1773,6 +1773,48 @@ function parseCaptureClip(value: unknown): Electron.Rectangle | undefined {
   };
 }
 
+async function capturePageViaDebugger(
+  window: BrowserWindow,
+  clip: Electron.Rectangle | undefined,
+): Promise<OpenDesignHostCaptureResult | null> {
+  const debuggee = window.webContents.debugger;
+  const wasAttached = debuggee.isAttached();
+  try {
+    if (!wasAttached) debuggee.attach("1.3");
+    const result = await debuggee.sendCommand("Page.captureScreenshot", {
+      format: "png",
+      fromSurface: true,
+      ...(clip
+        ? {
+            clip: {
+              x: clip.x,
+              y: clip.y,
+              width: clip.width,
+              height: clip.height,
+              scale: 1,
+            },
+          }
+        : {}),
+    }) as { data?: unknown };
+    if (typeof result.data !== 'string' || !result.data) return null;
+    const dataUrl = `data:image/png;base64,${result.data}`;
+    const image = nativeImage.createFromDataURL(dataUrl);
+    const size = image.getSize();
+    if (size.width < 1 || size.height < 1) return null;
+    return { ok: true, dataUrl, w: size.width, h: size.height };
+  } catch {
+    return null;
+  } finally {
+    if (!wasAttached && debuggee.isAttached()) {
+      try {
+        debuggee.detach();
+      } catch {
+        /* ignore debugger detach failures */
+      }
+    }
+  }
+}
+
 function unavailableUpdaterStatus(): DesktopUpdateStatusSnapshot {
   return {
     arch: process.arch,
@@ -2405,6 +2447,8 @@ export async function createDesktopRuntime(options: DesktopRuntimeOptions): Prom
     }
     try {
       const clip = parseCaptureClip(rawOptions);
+      const debuggerCapture = await capturePageViaDebugger(window, clip);
+      if (debuggerCapture) return debuggerCapture;
       const image = clip
         ? await window.webContents.capturePage(clip)
         : await window.webContents.capturePage();

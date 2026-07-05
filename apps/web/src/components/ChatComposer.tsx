@@ -369,6 +369,8 @@ export interface ChatSendMeta {
   // for this run only is composed with the extra skill bodies, without
   // touching the project's persistent `skillId`.
   skillIds?: string[];
+  /** Absolute temp image paths uploaded via /api/upload for this run only. */
+  imagePaths?: string[];
   /** Overrides the run_created / run_finished `entry_from` analytics prop for
    *  this send (e.g. 'mark' when the turn is sent from the Mark draw overlay).
    *  Behavior never depends on it; it only shapes PostHog props. */

@@ -416,7 +416,7 @@ const TOOL_DEFS = [
   {
     name: 'start_run',
     description:
-      'Commission Open Design to generate or refine a design. Open Design spawns its own agent to do the work and returns a runId immediately. Poll get_run(runId) until status is terminal, then get_artifact to pull the result. Project optional; defaults to the active project. Requires an existing project (create one first with create_project).',
+      'Commission Open Design to generate or refine a design. Open Design spawns its own agent to do the work and returns a runId immediately. Poll get_run(runId) until status is terminal. Project optional; defaults to the active project. Requires an existing project (create one first with create_project). Pass newConversation:true for a fresh design thread or conversationId to continue an existing thread.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -424,6 +424,18 @@ const TOOL_DEFS = [
         prompt: {
           type: 'string',
           description: 'What to make or change, in natural language. Optional when a plugin supplies its own brief.',
+        },
+        conversationId: {
+          type: 'string',
+          description: 'Conversation id to continue. Optional. Mutually exclusive with newConversation:true.',
+        },
+        newConversation: {
+          type: 'boolean',
+          description: 'When true, create a fresh conversation for this run. Optional. Mutually exclusive with conversationId.',
+        },
+        conversationTitle: {
+          type: 'string',
+          description: 'Title for a newly-created conversation when newConversation:true. Optional.',
         },
         skill: {
           type: 'string',
@@ -1075,6 +1087,9 @@ async function startRun(baseUrl: string, args: McpArgs) {
   const { id, resolved, active } = await resolveProjectArg(baseUrl, args.project);
   const body: JsonObject = { projectId: id };
   if (typeof args.prompt === 'string' && args.prompt.length > 0) body.message = args.prompt;
+  if (typeof args.conversationId === 'string' && args.conversationId.length > 0) body.conversationId = args.conversationId;
+  if (args.newConversation === true) body.newConversation = true;
+  if (typeof args.conversationTitle === 'string' && args.conversationTitle.length > 0) body.conversationTitle = args.conversationTitle;
   if (typeof args.skill === 'string' && args.skill.length > 0) body.skillId = args.skill;
   if (typeof args.plugin === 'string' && args.plugin.length > 0) body.pluginId = args.plugin;
   if (typeof args.agent === 'string' && args.agent.length > 0) body.agentId = args.agent;
@@ -1088,8 +1103,9 @@ async function startRun(baseUrl: string, args: McpArgs) {
   const created = await postJson<JsonObject>(`${baseUrl}/api/runs`, body);
   // Build studioUrl (conversation-level — no entry file yet) so the
   // outer agent has a URL to give the user right away. The daemon
-  // returns conversationId in the response now that POST /api/runs
-  // falls back to the project's default conversation for MCP callers.
+  // returns conversationId in the response. MCP callers can request a
+  // fresh conversation for a slice-level design thread or continue an
+  // existing conversation for rework prompts.
   const webBase = await getWebBaseUrl(baseUrl);
   const studioUrl = buildStudioUrl(webBase, id, created?.conversationId, null);
   return ok(

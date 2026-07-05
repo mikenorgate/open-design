@@ -60,6 +60,12 @@ export interface AnnotationEventDetail {
   ack?: (result: { ok: boolean; message?: string }) => void;
 }
 
+export type AnnotationSubmitDetail = Omit<AnnotationEventDetail, 'ack'>;
+export type AnnotationSubmitResult = { ok: boolean; message?: string };
+export type AnnotationSubmitHandler = (
+  detail: AnnotationSubmitDetail,
+) => AnnotationSubmitResult | void | Promise<AnnotationSubmitResult | void>;
+
 interface Props {
   children: ReactNode;
   active?: boolean;
@@ -74,6 +80,7 @@ interface Props {
   sendDisabledReason?: string;
   onToolbarClick?: (element: DrawToolbarElement, submitAction?: AnnotationAction) => void;
   toolbarHost?: HTMLElement | null;
+  onAnnotation?: AnnotationSubmitHandler;
 }
 
 const STROKE_COLOR = '#ff3b30';
@@ -120,6 +127,86 @@ function dockPlacementEquals(
   );
 }
 
+async function callAnnotationHandler(
+  handler: AnnotationSubmitHandler,
+  detail: AnnotationSubmitDetail,
+  fallbackMessage: string,
+): Promise<AnnotationSubmitResult> {
+  try {
+    return (await handler(detail)) ?? { ok: true };
+  } catch (err) {
+    console.warn('Could not send annotation', err);
+    return { ok: false, message: fallbackMessage };
+  }
+}
+
+function dispatchAnnotation(
+  detail: AnnotationSubmitDetail,
+  timeoutMessage: string,
+): Promise<AnnotationSubmitResult> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (next: AnnotationSubmitResult) => {
+      if (settled) return;
+      settled = true;
+      resolve(next);
+    };
+    window.setTimeout(() => {
+      finish({ ok: false, message: timeoutMessage });
+    }, 60000);
+    window.dispatchEvent(new CustomEvent(ANNOTATION_EVENT, {
+      detail: {
+        ...detail,
+        ack: finish,
+      } satisfies AnnotationEventDetail,
+    }));
+  });
+}
+
+async function snapshotLooksBlank(snap: PreviewSnapshot): Promise<boolean> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.min(snap.w, 160));
+        canvas.height = Math.max(1, Math.min(snap.h, 160));
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(false);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+        const step = Math.max(4, Math.floor((canvas.width * canvas.height) / 4096)) * 4;
+        let first: [number, number, number, number] | null = null;
+        let samples = 0;
+        for (let i = 0; i + 3 < data.length; i += step) {
+          samples++;
+          if (!first) {
+            first = [data[i]!, data[i + 1]!, data[i + 2]!, data[i + 3]!];
+            continue;
+          }
+          if (
+            Math.abs(data[i]! - first[0]) > 6 ||
+            Math.abs(data[i + 1]! - first[1]) > 6 ||
+            Math.abs(data[i + 2]! - first[2]) > 6 ||
+            Math.abs(data[i + 3]! - first[3]) > 6
+          ) {
+            resolve(false);
+            return;
+          }
+        }
+        resolve(samples > 8);
+      } catch {
+        resolve(false);
+      }
+    };
+    img.onerror = () => resolve(false);
+    img.src = snap.dataUrl;
+  });
+}
+
 export function PreviewDrawOverlay({
   children,
   active = false,
@@ -134,6 +221,7 @@ export function PreviewDrawOverlay({
   sendDisabledReason,
   onToolbarClick,
   toolbarHost,
+  onAnnotation,
 }: Props) {
   const t = useT();
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -908,11 +996,14 @@ export function PreviewDrawOverlay({
       // The host's captureSnapshot is a compositor screenshot of the on-screen
       // region, which would otherwise include this overlay's own strokes +
       // toolbar. Hide them for the capture; compositeWithBackground re-paints
-      // the marks onto the result afterwards.
+      // the marks onto the result afterwards. If the host capture is unavailable
+      // (for example in a pure browser session), fall through to the iframe
+      // bridge instead of treating the annotation as failed.
       flushSync(() => setCapturing(true));
       try {
         await waitForOverlayHidden();
-        return await captureSnapshot();
+        const snapshot = await captureSnapshot();
+        if (snapshot && !(await snapshotLooksBlank(snapshot))) return snapshot;
       } finally {
         flushSync(() => setCapturing(false));
       }
@@ -1053,29 +1144,19 @@ export function PreviewDrawOverlay({
       }
       const sentWithoutScreenshot = shouldCapture && !file;
       const kind = markKind();
-      const result = await new Promise<{ ok: boolean; message?: string }>((resolve) => {
-        let settled = false;
-        const finish = (next: { ok: boolean; message?: string }) => {
-          if (settled) return;
-          settled = true;
-          resolve(next);
-        };
-        window.setTimeout(() => {
-          finish({ ok: false, message: t('chat.annotationTimeout') });
-        }, 60000);
-        const detail: AnnotationEventDetail = {
-          file,
-          note: note.trim(),
-          action,
-          filePath: captureTarget?.filePath || filePath,
-          markKind: kind,
-          bounds: kind ? annotationBounds() : undefined,
-          target: captureTarget,
-          extraFiles: extraFiles.length ? extraFiles : undefined,
-          ack: finish,
-        };
-        window.dispatchEvent(new CustomEvent(ANNOTATION_EVENT, { detail }));
-      });
+      const detail: AnnotationSubmitDetail = {
+        file,
+        note: note.trim(),
+        action,
+        filePath: captureTarget?.filePath || filePath,
+        markKind: kind,
+        bounds: kind ? annotationBounds() : undefined,
+        target: captureTarget,
+        extraFiles: extraFiles.length ? extraFiles : undefined,
+      };
+      const result = onAnnotation
+        ? await callAnnotationHandler(onAnnotation, detail, t('chat.annotationFailed'))
+        : await dispatchAnnotation(detail, t('chat.annotationTimeout'));
       if (!result.ok) {
         setCaptureWarning({
           action,

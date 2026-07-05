@@ -5925,6 +5925,7 @@ export function ProjectView({
           context: runContext,
           designSystemId: projectDesignSystemId ?? null,
           attachments: runAttachments.map((a) => a.path),
+          imagePaths: meta?.imagePaths ?? [],
           commentAttachments: runCommentAttachments,
           sessionMode: runSessionMode,
           appliedPluginSnapshotId:
@@ -6524,9 +6525,13 @@ export function ProjectView({
   ]);
 
   const handleSendBoardCommentAttachments = useCallback(
-    async (commentAttachments: ChatCommentAttachment[], images: File[] = []) => {
+    async (
+      commentAttachments: ChatCommentAttachment[],
+      images: File[] = [],
+      opts: { imagePaths?: string[] } = {},
+    ) => {
       if (currentConversationQueueDisabled) return false;
-      if (commentAttachments.length === 0 && images.length === 0) return false;
+      if (commentAttachments.length === 0 && images.length === 0 && (opts.imagePaths?.length ?? 0) === 0) return false;
       setWorkspaceFocused(false);
       setCommentInspectorActive(false);
       // Upload any attached images once, then queue. Each comment becomes its
@@ -6538,20 +6543,24 @@ export function ProjectView({
         uploaded = result.uploaded;
       }
       if (commentAttachments.length === 0) {
-        if (uploaded.length > 0) await handleSend('', uploaded, [], { queueOnly: true, entryFrom: 'comment' });
+        if (uploaded.length > 0 || (opts.imagePaths?.length ?? 0) > 0) {
+          await handleSend('', uploaded, [], { queueOnly: true, entryFrom: 'comment', imagePaths: opts.imagePaths ?? [] });
+        }
         return true;
       }
       for (let i = 0; i < commentAttachments.length; i++) {
         const commentAttachment = commentAttachments[i]!;
         const savedImages = chatAttachmentsFromPreviewCommentImages(commentAttachment.imageAttachments);
         const prompt = commentTaskQuery(commentAttachment);
+        const runImagePaths = i === 0 ? opts.imagePaths ?? [] : [];
         // Comment/board pin → run: tag entry_from='comment' so the dashboard
-        // separates annotation-driven runs from plain composer sends.
+        // separates annotation-driven runs from plain composer sends. Temp
+        // visual screenshots travel as run image paths, not project files.
         await handleSend(
           prompt,
           mergeChatAttachments(i === 0 ? uploaded : [], savedImages),
           [commentTaskContextAttachment(commentAttachment)],
-          { queueOnly: true, entryFrom: 'comment' },
+          { queueOnly: true, entryFrom: 'comment', imagePaths: runImagePaths },
         );
       }
       return true;

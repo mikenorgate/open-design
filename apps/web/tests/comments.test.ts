@@ -220,6 +220,8 @@ describe('preview comment attachment helpers', () => {
     });
     expect(messageContentWithCommentAttachments('', [attachment])).toContain('targetKind: visual');
     expect(messageContentWithCommentAttachments('', [attachment])).toContain('screenshot: uploads/drawing.png');
+    expect(messageContentWithCommentAttachments('', [attachment])).toContain('screenshotAttached: yes');
+    expect(messageContentWithCommentAttachments('', [attachment])).toContain('inspect the pixels directly');
     expect(messageContentWithCommentAttachments('', [attachment])).toContain('markKind: stroke');
     expect(messageContentWithCommentAttachments('', [attachment])).not.toContain('selector: ');
   });

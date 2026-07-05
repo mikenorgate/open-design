@@ -33,6 +33,7 @@ import type { ConnectorService } from '../connectors/service.js';
 import {
   getConversation,
   getProject,
+  insertConversation,
   listConversations,
   normalizeConversationSessionMode,
   updateProject,
@@ -566,6 +567,15 @@ export function registerRunRoutes(app: Express, ctx: RegisterRunRoutesDeps) {
       mediaExecution: mediaExecution.policy,
       toolBundle: toolBundle.bundle,
     };
+    const requestedConversationId = typeof requestBody.conversationId === 'string'
+      && requestBody.conversationId.trim().length > 0
+      ? requestBody.conversationId.trim()
+      : null;
+    const shouldCreateConversation = requestBody.newConversation === true;
+    const requestedConversationTitle = typeof requestBody.conversationTitle === 'string'
+      && requestBody.conversationTitle.trim().length > 0
+      ? requestBody.conversationTitle.trim()
+      : null;
     if (resolvedSnapshot?.ok) {
       meta.appliedPluginSnapshotId = resolvedSnapshot.snapshotId;
       if (!meta.pluginId) meta.pluginId = resolvedSnapshot.snapshot.pluginId;
@@ -627,44 +637,92 @@ export function registerRunRoutes(app: Express, ctx: RegisterRunRoutesDeps) {
     if (runProject?.metadata) {
       meta.projectMetadata = runProject.metadata;
     }
-    if (
-      typeof meta.projectId === 'string' &&
-      meta.projectId &&
-      (typeof meta.conversationId !== 'string' || !meta.conversationId)
-    ) {
-      try {
-        const convs = toConversationRecords(listConversations(db, meta.projectId));
-        const defaultConv = convs.length > 0
-          ? [...convs].sort((a, b) => {
-              const aCreated = Number(a?.createdAt);
-              const bCreated = Number(b?.createdAt);
-              if (Number.isFinite(aCreated) && Number.isFinite(bCreated) && aCreated !== bCreated) {
-                return aCreated - bCreated;
-              }
-              return String(a?.id ?? '').localeCompare(String(b?.id ?? ''));
-            })[0]
+    if (requestedConversationId && !isSafeId(requestedConversationId)) {
+      return sendApiError(res, 400, 'BAD_REQUEST', 'conversationId is invalid');
+    }
+    if (requestedConversationId && shouldCreateConversation) {
+      return sendApiError(res, 400, 'BAD_REQUEST', 'conversationId and newConversation cannot both be provided');
+    }
+    if (typeof meta.projectId === 'string' && meta.projectId) {
+      const promptForUserMessage =
+        typeof meta.message === 'string' && meta.message.trim().length > 0
+          ? meta.message
           : null;
-        if (defaultConv && typeof defaultConv.id === 'string' && defaultConv.id) {
-          meta.conversationId = defaultConv.id;
-          if (typeof meta.assistantMessageId !== 'string' || !meta.assistantMessageId) {
-            meta.assistantMessageId = randomUUID();
-          }
-          const promptForUserMessage =
-            typeof meta.message === 'string' && meta.message.trim().length > 0
-              ? meta.message
-              : null;
-          if (promptForUserMessage) {
-            upsertMessage(db, defaultConv.id, {
-              id: randomUUID(),
-              role: 'user',
-              content: promptForUserMessage,
-              startedAt: Date.now(),
-              endedAt: Date.now(),
-            });
-          }
+      if (requestedConversationId) {
+        const requestedConversation = getConversation(db, requestedConversationId) as JsonRecord | null;
+        if (!requestedConversation) {
+          return sendApiError(res, 404, 'NOT_FOUND', 'conversation not found');
         }
-      } catch (err) {
-        console.warn('[runs] mcp conversation fallback failed', err);
+        if (requestedConversation.projectId !== meta.projectId) {
+          return sendApiError(res, 400, 'BAD_REQUEST', 'conversationId does not belong to projectId');
+        }
+        meta.conversationId = requestedConversationId;
+        if (typeof meta.assistantMessageId !== 'string' || !meta.assistantMessageId) {
+          meta.assistantMessageId = randomUUID();
+        }
+        if (promptForUserMessage) {
+          upsertMessage(db, requestedConversationId, {
+            id: randomUUID(),
+            role: 'user',
+            content: promptForUserMessage,
+            startedAt: Date.now(),
+            endedAt: Date.now(),
+          });
+        }
+      } else if (shouldCreateConversation) {
+        const now = Date.now();
+        const conversationId = randomUUID();
+        insertConversation(db, {
+          id: conversationId,
+          projectId: meta.projectId,
+          title: requestedConversationTitle,
+          createdAt: now,
+          updatedAt: now,
+        });
+        meta.conversationId = conversationId;
+        if (typeof meta.assistantMessageId !== 'string' || !meta.assistantMessageId) {
+          meta.assistantMessageId = randomUUID();
+        }
+        if (promptForUserMessage) {
+          upsertMessage(db, conversationId, {
+            id: randomUUID(),
+            role: 'user',
+            content: promptForUserMessage,
+            startedAt: now,
+            endedAt: now,
+          });
+        }
+      } else if (typeof meta.conversationId !== 'string' || !meta.conversationId) {
+        try {
+          const convs = toConversationRecords(listConversations(db, meta.projectId));
+          const defaultConv = convs.length > 0
+            ? [...convs].sort((a, b) => {
+                const aCreated = Number(a?.createdAt);
+                const bCreated = Number(b?.createdAt);
+                if (Number.isFinite(aCreated) && Number.isFinite(bCreated) && aCreated !== bCreated) {
+                  return aCreated - bCreated;
+                }
+                return String(a?.id ?? '').localeCompare(String(b?.id ?? ''));
+              })[0]
+            : null;
+          if (defaultConv && typeof defaultConv.id === 'string' && defaultConv.id) {
+            meta.conversationId = defaultConv.id;
+            if (typeof meta.assistantMessageId !== 'string' || !meta.assistantMessageId) {
+              meta.assistantMessageId = randomUUID();
+            }
+            if (promptForUserMessage) {
+              upsertMessage(db, defaultConv.id, {
+                id: randomUUID(),
+                role: 'user',
+                content: promptForUserMessage,
+                startedAt: Date.now(),
+                endedAt: Date.now(),
+              });
+            }
+          }
+        } catch (err) {
+          console.warn('[runs] mcp conversation fallback failed', err);
+        }
       }
     }
     const conversationSession =

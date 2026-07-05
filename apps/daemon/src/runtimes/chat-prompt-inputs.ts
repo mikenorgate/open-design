@@ -584,6 +584,7 @@ export function renderCommentAttachmentHint(
       if (item.screenshotPath) {
         lines.push(
           `screenshot: ${item.screenshotPath}`,
+          'screenshotAttached: yes — the screenshot is attached to this user message as an image input; inspect the pixels directly, not just the position metadata.',
           `markKind: ${item.markKind || 'stroke'}`,
           `intent: ${item.intent || visualAnnotationIntent(item.markKind || 'stroke')}`,
         );
@@ -901,6 +902,27 @@ export function formatDesignFilesWorkspaceHint(
   }
 
   return lines.join('\n');
+}
+
+export function collectPromptImagePathInputs(
+  imagePaths: readonly unknown[] | null | undefined,
+  commentAttachments: readonly { screenshotPath?: unknown }[] | null | undefined,
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (value: unknown) => {
+    const imagePath = typeof value === 'string' ? value.trim() : '';
+    if (!imagePath || seen.has(imagePath)) return;
+    seen.add(imagePath);
+    out.push(imagePath);
+  };
+  if (Array.isArray(imagePaths)) {
+    for (const imagePath of imagePaths) add(imagePath);
+  }
+  if (Array.isArray(commentAttachments)) {
+    for (const attachment of commentAttachments) add(attachment?.screenshotPath);
+  }
+  return out;
 }
 
 export function resolveSafePromptImagePaths(

@@ -82,6 +82,8 @@ export interface ChatRequest {
   skillIds?: string[];
   designSystemId?: string | null;
   attachments?: string[];
+  /** Absolute temp image paths uploaded via /api/upload for runtimes that accept image input. */
+  imagePaths?: string[];
   commentAttachments?: ChatCommentAttachment[];
   model?: string | null;
   reasoning?: string | null;

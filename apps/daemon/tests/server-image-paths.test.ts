@@ -1,6 +1,10 @@
 import { expect, test } from 'vitest';
 
-import { resolveSafePromptImagePaths, selectPromptImagePaths } from '../src/server.js';
+import {
+  collectPromptImagePathInputs,
+  resolveSafePromptImagePaths,
+  selectPromptImagePaths,
+} from '../src/server.js';
 
 test('selectPromptImagePaths uses staged AMR paths in prompt text', () => {
   expect(
@@ -20,6 +24,26 @@ test('selectPromptImagePaths keeps original paths for non-AMR agents', () => {
       ['/project/.amr-attachments/staged.png'],
     ),
   ).toEqual(['/tmp/od-uploads/original.png']);
+});
+
+test('collectPromptImagePathInputs includes visual screenshot paths from comment attachments', () => {
+  expect(
+    collectPromptImagePathInputs([], [
+      { screenshotPath: '/tmp/od-uploads/drawing.png' },
+    ]),
+  ).toEqual(['/tmp/od-uploads/drawing.png']);
+});
+
+test('collectPromptImagePathInputs dedupes explicit image paths and visual screenshots', () => {
+  expect(
+    collectPromptImagePathInputs(
+      ['/tmp/od-uploads/drawing.png', ''],
+      [
+        { screenshotPath: '/tmp/od-uploads/drawing.png' },
+        { screenshotPath: '/tmp/od-uploads/other.png' },
+      ],
+    ),
+  ).toEqual(['/tmp/od-uploads/drawing.png', '/tmp/od-uploads/other.png']);
 });
 
 test('resolveSafePromptImagePaths rejects images larger than 1 MB', () => {

@@ -2090,6 +2090,22 @@ export interface UploadProjectFilesResult {
   error?: string;
 }
 
+export interface PromptImageUpload {
+  name: string;
+  path: string;
+  size?: number;
+}
+
+export async function uploadPromptImages(files: File[]): Promise<PromptImageUpload[]> {
+  if (files.length === 0) return [];
+  const form = new FormData();
+  for (const file of files) form.append('images', file);
+  const resp = await fetch('/api/upload', { method: 'POST', body: form });
+  if (!resp.ok) throw new Error(`prompt image upload failed (${resp.status})`);
+  const json = (await resp.json()) as { files?: PromptImageUpload[] };
+  return json.files ?? [];
+}
+
 export async function uploadProjectFiles(
   projectId: string,
   files: File[],

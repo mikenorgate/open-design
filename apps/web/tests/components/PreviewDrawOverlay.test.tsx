@@ -602,6 +602,36 @@ describe('PreviewDrawOverlay', () => {
     }
   });
 
+  it('can submit through a direct annotation handler without waiting for the global composer event', async () => {
+    const annotation = vi.fn();
+    const onAnnotation = vi.fn(async () => ({ ok: true }));
+    window.addEventListener('opendesign:annotation', annotation);
+
+    try {
+      const { container, getByRole } = render(
+        <PreviewDrawOverlay active onAnnotation={onAnnotation}>
+          <div style={{ width: 320, height: 200 }} />
+        </PreviewDrawOverlay>,
+      );
+
+      const input = container.querySelector<HTMLInputElement>('.preview-draw-note-input');
+      expect(input).toBeTruthy();
+      fireEvent.change(input!, { target: { value: 'Mark the app preview hero.' } });
+
+      fireEvent.click(getByRole('button', { name: 'Queue' }));
+
+      await waitFor(() => expect(onAnnotation).toHaveBeenCalledTimes(1));
+      expect(onAnnotation).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'queue',
+        note: 'Mark the app preview hero.',
+      }));
+      expect(annotation).not.toHaveBeenCalled();
+      await waitFor(() => expect(input!.value).toBe(''));
+    } finally {
+      window.removeEventListener('opendesign:annotation', annotation);
+    }
+  });
+
   it('clears transient ink when draw mode exits', async () => {
     const { container, rerender } = render(
       <PreviewDrawOverlay active>

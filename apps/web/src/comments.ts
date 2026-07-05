@@ -523,6 +523,7 @@ function renderCommentAttachmentContext(commentAttachments: ChatCommentAttachmen
       if (item.screenshotPath) {
         lines.push(
           `screenshot: ${item.screenshotPath}`,
+          'screenshotAttached: yes — the screenshot is attached to this user message as an image input; inspect the pixels directly, not just the position metadata.',
           `markKind: ${item.markKind || 'stroke'}`,
           `intent: ${item.intent || visualAnnotationIntent(item.markKind || 'stroke')}`,
         );

@@ -46,6 +46,7 @@ import {
   updateDesignSystemDraft,
   type UploadProjectFilesResult,
   uploadProjectFiles,
+  uploadPromptImages,
   writeProjectBase64File,
   writeProjectTextFile,
 } from '../providers/registry';
@@ -63,13 +64,14 @@ import {
   replaceDesignMdColorAtIndex,
   updateBrandColor,
 } from '../runtime/kit-edit';
-import { buildBoardCommentAttachments } from '../comments';
+import { buildBoardCommentAttachments, buildVisualAnnotationAttachment } from '../comments';
 import { latestTodosFromEvents, type TodoItem } from '../runtime/todos';
 import { deliverableSlideNavForActiveFile, isSlideNavDeliverableNow } from '../runtime/slide-nav';
 import { buildSrcdoc } from '../runtime/srcdoc';
 import { removeSpeakerNotesFromHtml } from '../runtime/speaker-notes';
 import { useDesignKit, hostnameOf, type KitColor } from '../runtime/design-kit';
 import { useKitModuleUpload } from '../runtime/kit-upload';
+import { captureHostRegionSnapshot } from '../runtime/exports';
 import {
   DesignKitView,
   type DesignKitActionFeedbackTone,
@@ -110,7 +112,7 @@ import {
 import { createTerminal, killTerminal, listPlugins } from '../state/projects';
 import { DesignFilesPanel, type DesignFilesNavState } from './DesignFilesPanel';
 import { DevServerControls } from './DevServerControls';
-import { PreviewDrawOverlay } from './PreviewDrawOverlay';
+import { PreviewDrawOverlay, type AnnotationSubmitHandler } from './PreviewDrawOverlay';
 import {
   DesignBrowserPanel,
   labelFromUrl,
@@ -208,7 +210,7 @@ interface Props {
   previewComments?: PreviewComment[];
   onSavePreviewComment?: (target: PreviewCommentTarget, note: string, attachAfterSave: boolean, images?: File[]) => Promise<PreviewComment | null>;
   onRemovePreviewComment?: (commentId: string) => Promise<void>;
-  onSendBoardCommentAttachments?: (attachments: ChatCommentAttachment[], images?: File[]) => Promise<boolean | void> | boolean | void;
+  onSendBoardCommentAttachments?: (attachments: ChatCommentAttachment[], images?: File[], opts?: { imagePaths?: string[] }) => Promise<boolean | void> | boolean | void;
   onBrandExtractionStopRequest?: () => void;
   onRequestBrowserUsePrompt?: (prompt: string) => void;
   onPluginFolderAgentAction?: (
@@ -1830,7 +1832,6 @@ export function FileWorkspace({
     if (
       activeTab === DESIGN_FILES_TAB
       || activeTab === DESIGN_SYSTEM_TAB
-      || activeTab === QUESTIONS_TAB
       || activeTab === APP_PREVIEW_TAB
     ) return;
     if (isBrowserTabId(activeTab)) {
@@ -2084,10 +2085,6 @@ export function FileWorkspace({
     if (!workspaceTabIds.includes(activeTab)) return;
     if (activeTab === DESIGN_FILES_TAB || activeTab === DESIGN_SYSTEM_TAB) return;
     if (activeTab === APP_PREVIEW_TAB && devServerRunning) return;
-    if (activeTab === QUESTIONS_TAB) {
-      setActiveTab(defaultRootTab);
-      return;
-    }
     if (isBrowserTabId(activeTab)) {
       closeBrowserTab(activeTab);
       return;
@@ -2291,7 +2288,7 @@ export function FileWorkspace({
   // The Pages switcher is already sticky-pinned, so we only scroll
   // for real workspace tabs. Issue #775.
   useEffect(() => {
-    if (activeTab === DESIGN_FILES_TAB || activeTab === DESIGN_SYSTEM_TAB || activeTab === QUESTIONS_TAB || activeTab === APP_PREVIEW_TAB) return;
+    if (activeTab === DESIGN_FILES_TAB || activeTab === DESIGN_SYSTEM_TAB || activeTab === APP_PREVIEW_TAB) return;
     const tabBar = tabsBarRef.current;
     if (!tabBar) return;
     const el = tabBar.querySelector<HTMLElement>('.ws-tab.active');
@@ -3530,23 +3527,6 @@ export function FileWorkspace({
               ) : null}
             </button>
           ) : null}
-          {showQuestionsTab ? (
-            <button
-              type="button"
-              className={`ws-tab questions-tab ${activeTab === QUESTIONS_TAB ? 'active' : ''}`}
-              role="tab"
-              aria-selected={activeTab === QUESTIONS_TAB}
-              tabIndex={0}
-              data-testid="questions-tab"
-              onClick={() => setActiveTab(QUESTIONS_TAB)}
-              title={t('questions.tabLabel')}
-            >
-              <span className="tab-icon" aria-hidden>
-                <Icon name="help-circle" size={13} />
-              </span>
-              <span className="ws-tab-label">{t('questions.tabLabel')}</span>
-            </button>
-          ) : null}
           {visibleOrderedWorkspaceTabs.map((entry) => {
             if (entry.kind === 'browser') {
               const browserTab = entry.browserTab;
@@ -3770,17 +3750,6 @@ export function FileWorkspace({
             onSendBoardCommentAttachments={onSendBoardCommentAttachments}
             onCommentModeChange={onCommentModeChange}
             onAppPreviewContextChange={onAppPreviewContextChange}
-          />
-        ) : activeTab === QUESTIONS_TAB ? (
-          <QuestionsPanel
-            key={questionFormKey ?? undefined}
-            formKey={questionFormKey}
-            form={questionForm ?? questionFormPreview}
-            interactive={questionFormInteractive}
-            submitDisabled={questionFormSubmitDisabled}
-            submittedAnswers={questionFormSubmittedAnswers}
-            generating={questionsGenerating}
-            onSubmit={(text) => onSubmitQuestionForm?.(text)}
           />
         ) : activeTab === DESIGN_SYSTEM_TAB && designSystemProject ? (
           <DesignSystemProjectPanel
@@ -8166,7 +8135,7 @@ function AppPreviewTab({
   streaming?: boolean;
   commentQueueOnSend?: boolean;
   commentSendDisabled?: boolean;
-  onSendBoardCommentAttachments?: (attachments: ChatCommentAttachment[]) => Promise<boolean | void> | boolean | void;
+  onSendBoardCommentAttachments?: (attachments: ChatCommentAttachment[], images?: File[], opts?: { imagePaths?: string[] }) => Promise<boolean | void> | boolean | void;
   onCommentModeChange?: (active: boolean) => void;
   onAppPreviewContextChange?: (context: AppPreviewPageContext | null) => void;
 }) {
@@ -8220,6 +8189,53 @@ function AppPreviewTab({
 
   const postPreviewMode = useCallback((payload: Record<string, unknown>) => {
     iframeRef.current?.contentWindow?.postMessage(payload, '*');
+  }, []);
+
+  const captureAppPreviewSnapshot = useCallback(async () => {
+    const iframe = iframeRef.current;
+    if (!iframe) return null;
+    const rect = iframe.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return null;
+
+    const hostSnapshot = await captureHostRegionSnapshot({
+      left: rect.left,
+      top: rect.top,
+      width: Math.max(1, Math.round(rect.width)),
+      height: Math.max(1, Math.round(rect.height)),
+    });
+    if (hostSnapshot) return hostSnapshot;
+
+    try {
+      const doc = iframe.contentDocument;
+      const win = iframe.contentWindow;
+      if (doc?.documentElement && win) {
+        const { default: html2canvas } = await import('html2canvas');
+        const scrollX = Math.max(win.scrollX || 0, doc.documentElement.scrollLeft || 0, doc.body?.scrollLeft || 0);
+        const scrollY = Math.max(win.scrollY || 0, doc.documentElement.scrollTop || 0, doc.body?.scrollTop || 0);
+        const width = Math.max(1, Math.round(rect.width));
+        const height = Math.max(1, Math.round(rect.height));
+        const canvas = await html2canvas(doc.documentElement, {
+          backgroundColor: '#ffffff',
+          imageTimeout: 2000,
+          logging: false,
+          scale: window.devicePixelRatio || 1,
+          scrollX: -scrollX,
+          scrollY: -scrollY,
+          useCORS: true,
+          width,
+          height,
+          windowWidth: Math.max(width, doc.documentElement.scrollWidth || 0),
+          windowHeight: Math.max(height, doc.documentElement.scrollHeight || 0),
+          x: scrollX,
+          y: scrollY,
+        });
+        return { dataUrl: canvas.toDataURL('image/png'), w: canvas.width, h: canvas.height };
+      }
+    } catch (err) {
+      console.warn('Could not capture App Preview iframe with html2canvas', err);
+    }
+
+    return null;
   }, []);
 
   const syncPreviewModes = useCallback(() => {
@@ -8291,6 +8307,69 @@ function AppPreviewTab({
     } catch (err) { setCommentError(err instanceof Error ? err.message : 'Could not send comment.'); } finally { setSendingComment(false); }
   }
 
+  const handleDrawAnnotation = useCallback<AnnotationSubmitHandler>(async (detail) => {
+    if (!onSendBoardCommentAttachments) {
+      return { ok: false, message: 'Could not send annotation.' };
+    }
+    if (detail.action === 'draft') {
+      return { ok: false, message: 'App Preview marks can be queued or sent from the Draw toolbar.' };
+    }
+
+    const extraImages = detail.extraFiles ?? [];
+    const imagePaths: string[] = [];
+    const attachments: ChatCommentAttachment[] = [];
+    if (detail.file && detail.markKind && detail.bounds) {
+      const uploadedImages = await uploadPromptImages([detail.file]);
+      const screenshot = uploadedImages[0];
+      if (!screenshot) {
+        return { ok: false, message: 'Could not upload the marked preview.' };
+      }
+      imagePaths.push(screenshot.path);
+      attachments.push(buildVisualAnnotationAttachment({
+        order: 1,
+        idSeed: screenshot.path,
+        screenshotPath: screenshot.path,
+        markKind: detail.markKind,
+        note: detail.note,
+        bounds: detail.bounds,
+        target: detail.target
+          ? {
+              filePath: detail.target.filePath || detail.filePath || APP_PREVIEW_COMMENT_FILE_PATH,
+              elementId: detail.target.elementId,
+              selector: detail.target.selector,
+              label: detail.target.label,
+              text: detail.target.text,
+              position: detail.target.position,
+              htmlHint: detail.target.htmlHint,
+            }
+          : {
+              filePath: detail.filePath || APP_PREVIEW_COMMENT_FILE_PATH,
+              position: detail.bounds,
+            },
+      }));
+    } else if (detail.note.trim()) {
+      const bounds = detail.bounds ?? { x: 0, y: 0, width: 1, height: 1 };
+      attachments.push({
+        id: `app-preview-mark-${Date.now().toString(36)}`,
+        order: 1,
+        filePath: detail.filePath || APP_PREVIEW_COMMENT_FILE_PATH,
+        elementId: 'app-preview-mark',
+        selector: '',
+        label: detail.markKind ? 'Marked app preview region' : 'App Preview note',
+        comment: detail.note.trim(),
+        currentText: '',
+        pagePosition: bounds,
+        htmlHint: '',
+        selectionKind: detail.markKind ? 'visual' : 'element',
+        markKind: detail.markKind,
+        source: 'board-batch',
+      });
+    }
+
+    const accepted = await onSendBoardCommentAttachments(attachments, extraImages, { imagePaths });
+    return accepted === false ? { ok: false, message: 'Could not send annotation.' } : { ok: true };
+  }, [onSendBoardCommentAttachments]);
+
   function applyInspectDraft(prop: string, value: string) {
     if (!selectedTarget) return;
     setInspectDraft((c) => ({ ...c, [prop]: value }));
@@ -8328,9 +8407,11 @@ function AppPreviewTab({
           active={drawMode}
           onActiveChange={setDrawMode}
           captureTarget={null}
+          captureSnapshot={captureAppPreviewSnapshot}
           filePath={APP_PREVIEW_COMMENT_FILE_PATH}
           sendDisabled={Boolean(streaming || commentSendDisabled)}
           sendDisabledReason="A task is currently running"
+          onAnnotation={handleDrawAnnotation}
         >
           <iframe ref={iframeRef} key={`${reloadKey}-${localReloadKey}`} className="production-react-preview-frame" data-od-active="true" data-od-render-mode="url-load" title="App Preview" src={src} sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads" onLoad={handlePreviewFrameLoad} />
         </PreviewDrawOverlay>

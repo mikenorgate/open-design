@@ -448,7 +448,7 @@ function injectBridges(
       if (storyFrame && storyFrame.contentWindow) {
         var snapshotId = String(data.id);
         var done = false;
-        var timer = setTimeout(function(){ if (!done) renderSnapshot(snapshotId); }, 1200);
+        var timer = setTimeout(function(){ if (!done) waitForImages().then(function(){ renderSnapshot(snapshotId); }); }, 1200);
         var relaySnapshot = function(childEvent){
           var childData = childEvent && childEvent.data;
           if (!childData || childData.type !== 'od:snapshot:result' || childData.id !== snapshotId) return;
@@ -461,7 +461,7 @@ function injectBridges(
         storyFrame.contentWindow.postMessage(data, '*');
         return;
       }
-      renderSnapshot(String(data.id));
+      waitForImages().then(function(){ renderSnapshot(String(data.id)); });
     }
   });
   document.addEventListener('mousemove', function(ev){
@@ -498,18 +498,79 @@ function injectBridges(
     for (var i = 0; i < count; i++) copyComputed(originals[i], clones[i]);
     cloneRoot.querySelectorAll('script').forEach(function(node){ node.remove(); });
     cloneRoot.querySelectorAll('link[rel~="stylesheet"],link[rel~="preload"],link[rel~="preconnect"]').forEach(function(node){ node.remove(); });
+    cloneRoot.querySelectorAll('style').forEach(function(node){
+      node.textContent = (node.textContent || '')
+        .replace(/@import[^;]+;/gi, '')
+        .replace(/@font-face\\s*\\{[^}]*\\}/gi, '');
+    });
+  }
+  function pruneHiddenSnapshotNodes(originalRoot, cloneRoot){
+    var originals = originalRoot.querySelectorAll('*');
+    var clones = cloneRoot.querySelectorAll('*');
+    var count = Math.min(originals.length, clones.length);
+    var removals = [];
+    for (var i = 0; i < count; i++){
+      var original = originals[i];
+      var clone = clones[i];
+      if (!original || !clone || !clone.parentNode) continue;
+      var computed = window.getComputedStyle(original);
+      if (computed && (computed.display === 'none' || computed.visibility === 'hidden')) removals.push(clone);
+    }
+    for (var r = removals.length - 1; r >= 0; r--) {
+      if (removals[r].parentNode) removals[r].parentNode.removeChild(removals[r]);
+    }
+  }
+  function waitForImages(){
+    var imgs = Array.prototype.slice.call(document.images || []);
+    return Promise.all(imgs.map(function(img){
+      if (img.complete) return Promise.resolve();
+      return new Promise(function(resolve){
+        img.addEventListener('load', resolve, { once: true });
+        img.addEventListener('error', resolve, { once: true });
+      });
+    }));
+  }
+  function scrollOffset(){
+    var doc = document.documentElement;
+    var body = document.body;
+    return {
+      x: Math.max(window.scrollX || 0, doc ? doc.scrollLeft || 0 : 0, body ? body.scrollLeft || 0 : 0),
+      y: Math.max(window.scrollY || 0, doc ? doc.scrollTop || 0 : 0, body ? body.scrollTop || 0 : 0)
+    };
+  }
+  function escapeAttribute(value){
+    return String(value || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+  }
+  function snapshotBackgroundColor(){
+    try {
+      var probe = window.getComputedStyle(document.body || document.documentElement);
+      var bg = probe && probe.backgroundColor || '';
+      if (!bg || bg === 'transparent' || bg === 'rgba(0, 0, 0, 0)') return '#ffffff';
+      return bg;
+    } catch (_) { return '#ffffff'; }
   }
   function renderSnapshot(id){
     try {
       var w = Math.max(1, window.innerWidth || document.documentElement.clientWidth || 1);
       var h = Math.max(1, window.innerHeight || document.documentElement.clientHeight || 1);
       var dpr = window.devicePixelRatio || 1;
+      var bgColor = snapshotBackgroundColor();
+      var docW = Math.max(w, document.documentElement.scrollWidth || 0, document.body ? document.body.scrollWidth : 0);
+      var docH = Math.max(h, document.documentElement.scrollHeight || 0, document.body ? document.body.scrollHeight : 0);
       var clone = document.documentElement.cloneNode(true);
       clone.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
       inlineSnapshotStyles(document.documentElement, clone);
+      pruneHiddenSnapshotNodes(document.documentElement, clone);
+      var scroll = scrollOffset();
       var body = clone.querySelector('body');
-      var html = '<div xmlns="http://www.w3.org/1999/xhtml" style="margin:0;width:' + w + 'px;height:' + h + 'px;overflow:hidden;">' + (body ? body.innerHTML : clone.innerHTML) + '</div>';
-      var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '"><foreignObject x="0" y="0" width="' + w + '" height="' + h + '">' + html + '</foreignObject></svg>';
+      var rootStyle = clone.getAttribute('style') || '';
+      var bodyStyle = body ? body.getAttribute('style') || '' : '';
+      var bodyContent = body ? body.innerHTML : clone.innerHTML;
+      var wrapperStyle = rootStyle + bodyStyle +
+        'margin:0;position:relative;left:' + (-scroll.x) + 'px;top:' + (-scroll.y) + 'px;' +
+        'width:' + docW + 'px;height:' + docH + 'px;overflow:visible;';
+      var html = '<div xmlns="http://www.w3.org/1999/xhtml" style="' + escapeAttribute(wrapperStyle) + '">' + bodyContent + '</div>';
+      var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '"><foreignObject x="0" y="0" width="' + docW + '" height="' + docH + '">' + html + '</foreignObject></svg>';
       var img = new Image();
       img.onload = function(){
         try {
@@ -519,6 +580,8 @@ function injectBridges(
           var ctx = canvas.getContext('2d');
           if (!ctx) throw new Error('no 2d context');
           ctx.scale(dpr, dpr);
+          ctx.fillStyle = bgColor;
+          ctx.fillRect(0, 0, w, h);
           ctx.drawImage(img, 0, 0, w, h);
           post({ type: 'od:snapshot:result', id: id, dataUrl: canvas.toDataURL('image/png'), w: canvas.width, h: canvas.height });
         } catch (err) { post({ type: 'od:snapshot:result', id: id, error: String(err && err.message || err) }); }

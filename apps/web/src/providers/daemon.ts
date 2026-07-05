@@ -298,6 +298,7 @@ export interface DaemonStreamOptions {
   // daemon resolves them inside the project folder, validates they
   // exist, and stitches them into the user message as `@<path>` hints.
   attachments?: string[];
+  imagePaths?: string[];
   commentAttachments?: ChatCommentAttachment[];
   // Per-CLI model + reasoning the user picked in the model menu. Both are
   // optional; the daemon validates them against the agent's declared
@@ -640,6 +641,7 @@ export async function streamViaDaemon({
   skillIds,
   designSystemId,
   attachments,
+  imagePaths,
   commentAttachments,
   model,
   reasoning,
@@ -678,6 +680,7 @@ export async function streamViaDaemon({
     skillIds: Array.isArray(skillIds) ? skillIds : [],
     designSystemId: designSystemId ?? null,
     attachments: attachments ?? [],
+    imagePaths: imagePaths ?? [],
     commentAttachments: commentAttachments ?? [],
     model: model ?? null,
     reasoning: reasoning ?? null,

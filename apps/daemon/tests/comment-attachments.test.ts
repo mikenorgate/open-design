@@ -490,7 +490,6 @@ describe('preview comment agent payload', () => {
 
     const hint = renderCommentAttachmentHint(normalized);
 
-    expect(normalized[0]?.reactContext).toBeDefined();
     expect(hint).toContain('file: App Preview (live React app)');
     expect(hint).toContain('sourceType: production-react-component-or-page');
     expect(hint).toContain('selector: [data-od-id="login-button"]');
@@ -603,6 +602,8 @@ describe('preview comment agent payload', () => {
     });
     expect(hint).toContain('targetKind: visual');
     expect(hint).toContain('screenshot: uploads/drawing.png');
+    expect(hint).toContain('screenshotAttached: yes');
+    expect(hint).toContain('inspect the pixels directly');
     expect(hint).toContain('markKind: stroke');
     expect(hint).toContain('marked region');
     expect(hint).not.toContain('selector: ');

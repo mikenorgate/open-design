@@ -76,6 +76,7 @@ import {
 } from './browser/index.js';
 import {
   UPLOAD_DIR,
+  collectPromptImagePathInputs,
   composeLiveInstructionPrompt,
   formatDesignFilesWorkspaceHint,
   formatProjectAttachmentHint,
@@ -129,6 +130,7 @@ import {
   scanRunEventsForRetrySideEffects,
 } from './runtimes/run-lifecycle-analytics.js';
 export {
+  collectPromptImagePathInputs,
   composeLiveInstructionPrompt,
   formatDesignFilesWorkspaceHint,
   formatProjectAttachmentHint,
@@ -1730,7 +1732,10 @@ fs.mkdirSync(ARTIFACTS_DIR, { recursive: true });
 
 const upload = multer({
   storage: multer.diskStorage({
-    destination: UPLOAD_DIR,
+    destination: (_req, _file, cb) => {
+      fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+      cb(null, UPLOAD_DIR);
+    },
     filename: (_req, file, cb) => {
       file.originalname = decodeMultipartFilename(file.originalname);
       const safe = sanitizeName(file.originalname);
@@ -1745,7 +1750,10 @@ const upload = multer({
 
 const importUpload = multer({
   storage: multer.diskStorage({
-    destination: UPLOAD_DIR,
+    destination: (_req, _file, cb) => {
+      fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+      cb(null, UPLOAD_DIR);
+    },
     filename: (_req, file, cb) => {
       file.originalname = decodeMultipartFilename(file.originalname);
       const safe = sanitizeName(file.originalname);
@@ -4389,9 +4397,13 @@ export async function startServer({
     if (run.cancelRequested || design.runs.isTerminal(run.status)) return;
 
     // Sanitise supplied image paths: must live under UPLOAD_DIR and stay
-    // below the prompt-image safety cap.
+    // below the prompt-image safety cap. Visual mark screenshots are carried
+    // in comment attachment metadata as screenshotPath; when that path points
+    // at the temp upload root, forward it as an actual image input too so
+    // image-capable agent harnesses receive pixels, not just text metadata.
+    const promptImagePathInputs = collectPromptImagePathInputs(imagePaths, safeCommentAttachments);
     const { safeImages, oversizedImages, failedImages } =
-      resolveSafePromptImagePaths(imagePaths);
+      resolveSafePromptImagePaths(promptImagePathInputs);
     if (oversizedImages.length > 0) {
       return design.runs.fail(
         run,
